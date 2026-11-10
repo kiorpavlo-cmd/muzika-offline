@@ -1287,7 +1287,7 @@ async function forceRefreshOfflineShell(pulledDistance = 0) {
 
 content.addEventListener('touchstart', (event) => {
   if (event.touches.length !== 1 || content.scrollTop > 0 || refreshRunning || $('#modal-root').childElementCount) return;
-  if (document.activeElement?.matches('input, textarea')) return;
+  if (document.activeElement?.matches('input, textarea') && state.screen.tab !== 'search') return;
   content.classList.add('content--pulling');
   pullStart = { x: event.touches[0].clientX, y: event.touches[0].clientY };
   pullDistance = 0;
