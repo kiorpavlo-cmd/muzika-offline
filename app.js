@@ -24,7 +24,12 @@ const icons = {
   check: '<path d="m5 12 4 4L19 6"/>',
   close: '<path d="m6 6 12 12M18 6 6 18"/>',
   mic: '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-4 0h8"/>',
-  star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z" fill="currentColor" stroke="none"/>'
+  star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z" fill="currentColor" stroke="none"/>',
+  pin: '<path d="M16 3 8 11l-3-1-2 2 6 3 3 6 2-2-1-3 8-8-5-5Z"/><path d="m3 21 7-7"/>',
+  playlistAdd: '<path d="M4 6h11M4 12h11M4 18h7"/><path d="M19 3v8m-4-4h8"/>',
+  queue: '<path d="M4 6h12M4 12h12M4 18h8"/><path d="m17 16 5 3-5 3z" fill="currentColor" stroke="none"/>',
+  albumFile: '<rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="12" cy="12" r="4"/><path d="M12 8v8"/>',
+  trash: '<path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/>'
 };
 
 const icon = (name, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true">${icons[name] || ''}</svg>`;
@@ -40,8 +45,7 @@ const albums = [
   { id: 'kiss', title: 'Kiss You', artist: 'Serebro', art: 'coast', kind: 'album' },
   { id: 'dolls', title: 'Магазин игрушек для взрослых', artist: 'Кис-кис', art: 'comic', kind: 'album' },
   { id: 'angel-single', title: 'ангел-хранитель — Single', artist: 'я про рок', art: 'halo', kind: 'album' },
-  { id: 'everyday', title: 'Every Single Day', artist: 'Benny Benassi & Matt Sassari', art: 'concert', kind: 'album' },
-  { id: 'radio-mix', title: 'Станція користувача', artist: 'Підібрано для вас', art: 'neon', kind: 'playlist' }
+  { id: 'everyday', title: 'Every Single Day', artist: 'Benny Benassi & Matt Sassari', art: 'concert', kind: 'album' }
 ];
 
 const tracks = [
@@ -85,6 +89,9 @@ const state = {
   searchScope: 'catalog',
   recentSearches: JSON.parse(localStorage.getItem('muzika-searches') || '[]'),
   favorites: JSON.parse(localStorage.getItem('muzika-favorites') || '["t1","t8"]'),
+  pinnedSongs: JSON.parse(localStorage.getItem('muzika-pinned-songs') || '[]'),
+  hiddenTracks: JSON.parse(localStorage.getItem('muzika-hidden-tracks') || '[]'),
+  queue: [],
   googleProfile: (() => {
     try { return JSON.parse(localStorage.getItem('muzika-google-profile') || 'null'); } catch { return null; }
   })(),
@@ -118,6 +125,14 @@ const database = {
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
     });
+  },
+  async remove(id) {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const request = db.transaction('tracks', 'readwrite').objectStore('tracks').delete(id);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
   }
 };
 
@@ -131,11 +146,15 @@ function artMarkup(art, label, extra = '') {
 }
 
 function currentTrack() {
-  return [...tracks, ...state.localTracks].find((track) => track.id === state.currentTrackId) || tracks[1];
+  return allTracks().find((track) => track.id === state.currentTrackId) || allTracks().find((track) => track.local) || allTracks()[0] || { id: '', title: 'Моя медіатека', artist: '', album: '', art: 'local' };
 }
 
 function allTracks() {
-  return [...tracks, ...state.localTracks];
+  return [...tracks.filter((track) => !state.hiddenTracks.includes(track.id)), ...state.localTracks];
+}
+
+function prioritizePinned(list) {
+  return [...list].sort((a, b) => Number(state.pinnedSongs.includes(b.id)) - Number(state.pinnedSongs.includes(a.id)));
 }
 
 function albumCards(items, compact = false) {
@@ -144,15 +163,121 @@ function albumCards(items, compact = false) {
 
 function songRow(track, index, options = {}) {
   const favorite = state.favorites.includes(track.id);
+  const pinned = state.pinnedSongs.includes(track.id);
   const playing = state.currentTrackId === track.id && state.isPlaying;
   return `<div class="song-row" data-song-index="${index}">
     ${artMarkup(track.art, track.album, 'song-art')}
     <button class="song-main" data-action="play-track" data-id="${safeText(track.id)}" aria-label="Відтворити ${safeText(track.title)}">
       <span class="song-title">${safeText(track.title)}</span><span class="song-artist">${safeText(track.artist)}${options.showAlbum ? ` · ${safeText(track.album)}` : ''}</span>
     </button>
-    <span class="song-indicators">${favorite ? '<span class="favorite-mark">★</span>' : ''}${playing ? '<span class="playing-bars"><i></i><i></i><i></i></span>' : ''}</span>
+    <span class="song-indicators">${favorite ? '<span class="favorite-mark">★</span>' : ''}${pinned ? icon('pin', 'pin-mark') : ''}${playing ? '<span class="playing-bars"><i></i><i></i><i></i></span>' : ''}</span>
     <button class="icon-button song-more" data-action="song-menu" data-id="${safeText(track.id)}" aria-label="Додаткові дії">${icon('more')}</button>
   </div>`;
+}
+
+function closeSongMenu() {
+  $('#modal-root').innerHTML = '';
+}
+
+function openSongMenu(track) {
+  const favorite = state.favorites.includes(track.id);
+  const pinned = state.pinnedSongs.includes(track.id);
+  const root = $('#modal-root');
+  root.innerHTML = `<div id="song-menu-backdrop" class="action-modal">
+    <section class="action-sheet" role="dialog" aria-modal="true" aria-label="Дії з піснею">
+      <div class="action-track-head">${artMarkup(track.art, track.album, 'action-art')}<button class="action-feature" data-action="toggle-favorite" data-id="${safeText(track.id)}">${icon('star')}<span>${favorite ? 'Вилучити з улюблених' : 'Додати до улюблених'}</span></button></div>
+      <button class="song-action-row" data-action="toggle-pin" data-id="${safeText(track.id)}">${icon('pin')}<span>${pinned ? 'Відкріпити пісню' : 'Закріпити пісню'}</span></button>
+      <button class="song-action-row" data-action="open-playlist-menu" data-id="${safeText(track.id)}">${icon('playlistAdd')}<span>Додати до підбірки</span></button>
+      <button class="song-action-row" data-action="play-next" data-id="${safeText(track.id)}">${icon('queue')}<span>Відтворити далі</span></button>
+      <button class="song-action-row song-action-row--album" data-action="open-track-album" data-id="${safeText(track.id)}">${icon('albumFile')}<span>Перейти до альбому<small>${safeText(track.album)}</small></span></button>
+      <button class="song-action-row song-action-row--danger" data-action="delete-track" data-id="${safeText(track.id)}">${icon('trash')}<span>Видалити з медіатеки</span></button>
+    </section>
+  </div>`;
+  root.querySelector('#song-menu-backdrop').addEventListener('click', (event) => {
+    if (event.target.id === 'song-menu-backdrop') closeSongMenu();
+  });
+}
+
+function openPlaylistMenu(track) {
+  const root = $('#modal-root');
+  root.innerHTML = `<div id="song-menu-backdrop" class="action-modal">
+    <section class="action-sheet action-sheet--playlists" role="dialog" aria-modal="true" aria-labelledby="playlist-menu-title">
+      <button class="action-back" data-action="back-to-song-menu" data-id="${safeText(track.id)}">${icon('back')}<span>Дії з піснею</span></button>
+      <h2 id="playlist-menu-title">Додати до підбірки</h2>
+      <button class="song-action-row" data-action="add-to-favorites" data-id="${safeText(track.id)}">${icon('star')}<span>Улюблені пісні</span></button>
+    </section>
+  </div>`;
+  root.querySelector('#song-menu-backdrop').addEventListener('click', (event) => {
+    if (event.target.id === 'song-menu-backdrop') closeSongMenu();
+  });
+}
+
+function addToFavorites(trackId) {
+  if (!state.favorites.includes(trackId)) {
+    state.favorites.push(trackId);
+    localStorage.setItem('muzika-favorites', JSON.stringify(state.favorites));
+  }
+  closeSongMenu();
+  render();
+  notify('Додано до підбірки «Улюблені пісні».');
+}
+
+function togglePinned(trackId) {
+  state.pinnedSongs = state.pinnedSongs.includes(trackId)
+    ? state.pinnedSongs.filter((id) => id !== trackId)
+    : [...state.pinnedSongs, trackId];
+  localStorage.setItem('muzika-pinned-songs', JSON.stringify(state.pinnedSongs));
+  closeSongMenu();
+  render();
+  notify(state.pinnedSongs.includes(trackId) ? 'Пісню закріплено.' : 'Пісню відкріплено.');
+}
+
+function queueTrackNext(trackId) {
+  state.queue = [trackId, ...state.queue.filter((id) => id !== trackId)];
+  closeSongMenu();
+  notify('Пісню додано до черги «Відтворити далі».');
+}
+
+async function playNextTrack() {
+  const queuedId = state.queue.shift();
+  const queuedTrack = queuedId && allTracks().find((track) => track.id === queuedId);
+  if (queuedTrack) return playTrack(queuedTrack);
+  const list = allTracks().filter((track) => track.local);
+  if (!list.length) return notify('Спершу додайте аудіофайл у медіатеку.');
+  const index = list.findIndex((track) => track.id === state.currentTrackId);
+  await playTrack(list[(index + 1) % list.length] || list[0]);
+}
+
+async function deleteTrackFromLibrary(trackId) {
+  const track = allTracks().find((item) => item.id === trackId);
+  if (!track) return closeSongMenu();
+  try {
+    if (track.local) {
+      await database.remove(trackId);
+      state.localTracks = state.localTracks.filter((item) => item.id !== trackId);
+    } else {
+      state.hiddenTracks = [...state.hiddenTracks, trackId];
+      localStorage.setItem('muzika-hidden-tracks', JSON.stringify(state.hiddenTracks));
+    }
+    state.favorites = state.favorites.filter((id) => id !== trackId);
+    state.pinnedSongs = state.pinnedSongs.filter((id) => id !== trackId);
+    state.queue = state.queue.filter((id) => id !== trackId);
+    localStorage.setItem('muzika-favorites', JSON.stringify(state.favorites));
+    localStorage.setItem('muzika-pinned-songs', JSON.stringify(state.pinnedSongs));
+    if (state.currentTrackId === trackId) {
+      audio.pause();
+      audio.removeAttribute('src');
+      if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
+      state.audioUrl = null;
+      state.currentTrackId = state.localTracks[0]?.id || allTracks()[0]?.id || '';
+      state.isPlaying = false;
+    }
+    closeSongMenu();
+    render();
+    notify('Пісню видалено з медіатеки.');
+  } catch {
+    notify('Не вдалося видалити пісню. Спробуйте ще раз.');
+  }
 }
 
 function sectionHeading(title, action = '', href = '') {
@@ -167,18 +292,16 @@ function renderHome() {
       <button class="feature-card feature-card--favorite" data-action="open-item" data-kind="playlist" data-id="favorites">
         <div class="favorite-art">${icon('star')}</div><span class="feature-kicker">Створено вами</span><strong>Улюблені пісні</strong><span>Усі пісні, що стали вашими улюбленими</span>
       </button>
-      <button class="feature-card feature-card--neon" data-action="open-item" data-kind="playlist" data-id="radio-mix"><span class="feature-kicker">Підібрано для вас</span><strong>Станція користувача</strong><span>Музика, яка пасує саме вам</span></button>
     </div>
     ${sectionHeading('Недавно прослухані', 'Усі', 'recent')}
     ${albumCards(recently)}
     ${sectionHeading('Пісні, які можуть сподобатися')}
-    <div class="song-list">${[tracks[8], tracks[10], tracks[4]].map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>
+    <div class="song-list">${[tracks[8], tracks[10], tracks[4]].filter((track) => !state.hiddenTracks.includes(track.id)).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>
     <div class="offline-note">${icon('download')}<span>Медіатека доступна офлайн</span></div>`;
 }
 
 function renderNew() {
   return `<header class="page-header"><h1>Новинки</h1><button class="profile-button" data-action="settings" aria-label="Профіль">ПК</button></header>
-    <section class="editorial-hero"><span class="editorial-kicker">ПІСНЯ, ЯКОЇ НАМ БРАКУВАЛО</span><h2>Музика, що лишається з тобою.</h2>${artMarkup('rose', 'Нові враження', 'hero-art')}</section>
     ${sectionHeading('Найкраще за 2026 рік', '›', 'all-albums')}${albumCards([albums[10], albums[4], albums[8], albums[1]])}
     ${sectionHeading('Нещодавно додані')}${albumCards([albums[1], albums[7], albums[9], albums[2]])}`;
 }
@@ -192,7 +315,7 @@ function renderRadio() {
     <div class="station-grid">${stations.map(([word, title], index) => `<button class="station-card station-card--${index}" data-action="station" data-title="${title}"><span>${word}</span><small>♫ radio</small></button>`).join('')}</div>
     ${sectionHeading('Наживо')}
     <button class="live-card" data-action="station" data-title="Музика наживо"><div class="live-art">${artMarkup('blue', 'LIVE')}</div><div class="live-copy"><span>ЗАРАЗ В ЕФІРІ</span><strong>Музика без пауз</strong><small>Слухайте збережені треки навіть без мережі</small></div></button>
-    ${sectionHeading('Ваші станції')}${albumCards([albums[11], albums[4], albums[0]])}`;
+    ${sectionHeading('Ваші станції')}${albumCards([albums[4], albums[0]])}`;
 }
 
 function renderLibrary() {
@@ -213,14 +336,15 @@ function renderSearchBody() {
   const matches = state.searchText.trim() ? allTracks().filter((track) => `${track.title} ${track.artist} ${track.album}`.toLowerCase().includes(state.searchText.toLowerCase())) : [];
   const local = state.searchScope === 'library' ? matches.filter((track) => track.local) : matches;
   return state.searchText.trim()
-    ? `<div class="search-results-label">${local.length ? 'Результати' : 'Нічого не знайдено'}</div><div class="song-list">${local.map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>`
+    ? `<div class="search-results-label">${local.length ? 'Результати' : 'Нічого не знайдено'}</div><div class="song-list">${prioritizePinned(local).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>`
     : `<div class="section-heading"><h2>Недавні пошуки</h2><button class="text-action text-action--red" data-action="clear-search">Очистити</button></div>
       <div class="recent-searches">${(state.recentSearches.length ? state.recentSearches : ['Улетаю', 'Улюблені пісні', 'Алсу']).map((term) => `<button data-action="recent-search" data-term="${safeText(term)}">${icon('search')}<span>${safeText(term)}</span>${icon('more')}</button>`).join('')}</div>`;
 }
 
 function renderItemScreen() {
   const { kind, id } = state.screen;
-  const item = [...albums, ...artists].find((value) => value.id === id) || { id, title: id === 'favorites' ? 'Улюблені пісні' : id === 'recent' ? 'Недавно прослухані' : 'Музика', artist: 'Ваша медіатека', art: id === 'favorites' ? 'favorite' : 'neon' };
+  const albumTrack = kind === 'album' ? allTracks().find((track) => track.album === id) : null;
+  const item = [...albums, ...artists].find((value) => value.id === id) || { id, title: id === 'favorites' ? 'Улюблені пісні' : id === 'recent' ? 'Недавно прослухані' : kind === 'album' ? id : 'Музика', artist: albumTrack?.artist || 'Ваша медіатека', art: id === 'favorites' ? 'favorite' : 'neon' };
   let heading = item.title;
   let list = [];
   if (kind === 'artist') list = allTracks().filter((track) => track.artist === id);
@@ -228,6 +352,7 @@ function renderItemScreen() {
   else if (id === 'favorites') list = allTracks().filter((track) => state.favorites.includes(track.id));
   else if (id === 'recent') list = [tracks[1], tracks[8], tracks[10], tracks[4]];
   else list = tracks.slice(0, 6);
+  list = prioritizePinned(list.filter((track) => !state.hiddenTracks.includes(track.id)));
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><button class="header-pill" data-action="song-menu" data-id="${safeText(id)}">${icon('menu')}<span class="pill-divider"></span>${icon('more')}</button></header>
     <section class="detail-heading">${kind === 'artist' ? artMarkup(item.art, item.title, 'detail-art detail-art--artist') : ''}<h1>${safeText(heading)}</h1>${kind !== 'artist' ? `<p>${safeText(item.artist || 'Ваша медіатека')}</p>` : ''}</section>
     <div class="detail-actions"><button data-action="play-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('play')} Відтворити</button><button data-action="shuffle-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('shuffle')} Тасувати</button></div>
@@ -247,7 +372,7 @@ function renderCategory() {
   } else if (category === 'albums') {
     rows = `<div class="album-grid">${albums.slice(0, 10).map((album) => `<button class="album-card" data-action="open-item" data-kind="album" data-id="${safeText(album.id)}">${artMarkup(album.art, album.title)}<span class="album-title">${safeText(album.title)}</span><span class="album-subtitle">${safeText(album.artist)}</span></button>`).join('')}</div>`;
   } else {
-    const list = category === 'downloaded' ? allTracks().filter((track) => track.local) : allTracks();
+    const list = prioritizePinned(category === 'downloaded' ? allTracks().filter((track) => track.local) : allTracks());
     rows = `<div class="song-list">${list.length ? list.map((track, i) => songRow(track, i, { showAlbum: category === 'downloaded' })).join('') : `<div class="empty-state">${category === 'downloaded' ? 'Тут з’явиться ваша музика, додана на пристрої.' : 'Додайте аудіофайли, щоб бачити свою медіатеку тут.'}</div>`}</div>`;
   }
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button>${category === 'songs' || category === 'albums' ? `<button class="header-pill" data-action="song-menu" data-id="${category}">${icon('menu')}<span class="pill-divider"></span>${icon('more')}</button>` : ''}</header>
@@ -261,15 +386,21 @@ function renderSettings() {
   const initials = profile?.name ? profile.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase() : 'ПК';
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><h2>Налаштування</h2><span></span></header>
     <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name)}` : 'Войти через Google'}"><span class="profile-button profile-button--large">${safeText(initials)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
-    <div class="settings-group"><div class="settings-row"><span>Стан мережі</span><strong class="${online ? 'online-label' : 'offline-label'}">${online ? 'Підключено' : 'Офлайн'}</strong></div><div class="settings-row"><span>Оновлення застосунку</span><button data-action="check-updates">Перевірити</button></div><div class="settings-row"><span>Офлайн-аудіо</span><strong>${state.localTracks.length} пісень</strong></div></div>
+    <div class="settings-group"><div class="settings-row"><span>Стан мережі</span><strong class="${online ? 'online-label' : 'offline-label'}">${online ? 'Підключено' : 'Офлайн'}</strong></div><div class="settings-row"><span>Оновлення застосунку</span><button data-action="check-updates">Оновити</button></div><div class="settings-row"><span>Офлайн-аудіо</span><strong>${state.localTracks.length} пісень</strong></div></div>
     <button class="import-panel" data-action="import">${icon('plus')}<span><strong>Додати аудіофайли</strong><small>Файли залишаються лише на вашому пристрої</small></span>${icon('back', 'chevron')}</button>
+    <button class="import-panel" data-action="drive-import">${icon('download')}<span><strong>Импорт из Google Диска</strong><small>Выбранные файлы сохраняются только на этом устройстве</small></span>${icon('back', 'chevron')}</button>
     <a class="import-panel profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>
     <p class="settings-note">Оновлення інтерфейсу завантажуються автоматично під час запуску, коли є інтернет. Збережена музика та сам застосунок доступні офлайн.</p>`;
 }
 
 const GOOGLE_CLIENT_ID = document.querySelector('meta[name="google-client-id"]')?.content.trim() || '';
+const GOOGLE_DRIVE_API_KEY = document.querySelector('meta[name="google-drive-api-key"]')?.content.trim() || '';
+const GOOGLE_CLOUD_PROJECT_NUMBER = document.querySelector('meta[name="google-cloud-project-number"]')?.content.trim() || '';
+const GOOGLE_DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 let googleIdentityPromise;
 let googleIdentityInitialized = false;
+let googleApiLoaderPromise;
+let googlePickerPromise;
 
 function closeGoogleAccount() {
   $('#modal-root').innerHTML = '';
@@ -315,6 +446,107 @@ function loadGoogleIdentityServices() {
     });
   }
   return googleIdentityPromise;
+}
+
+function loadGoogleApiLoader() {
+  if (window.gapi?.load) return Promise.resolve();
+  if (!googleApiLoaderPromise) {
+    googleApiLoaderPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://apis.google.com/js/api.js';
+      script.async = true;
+      script.defer = true;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error('google-api-loader-unavailable'));
+      document.head.append(script);
+    }).catch((error) => {
+      googleApiLoaderPromise = null;
+      throw error;
+    });
+  }
+  return googleApiLoaderPromise;
+}
+
+async function loadGooglePicker() {
+  if (window.google?.picker?.PickerBuilder) return;
+  if (!googlePickerPromise) {
+    googlePickerPromise = (async () => {
+      await loadGoogleApiLoader();
+      await new Promise((resolve, reject) => {
+        window.gapi.load('picker', {
+          callback: resolve,
+          onerror: () => reject(new Error('google-picker-unavailable')),
+          timeout: 10000,
+          ontimeout: () => reject(new Error('google-picker-timeout'))
+        });
+      });
+    })().catch((error) => {
+      googlePickerPromise = null;
+      throw error;
+    });
+  }
+  await googlePickerPromise;
+}
+
+function importFromGoogleDrive() {
+  if (!navigator.onLine) return notify('Для импорта из Google Диска подключитесь к интернету.');
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_DRIVE_API_KEY || !GOOGLE_CLOUD_PROJECT_NUMBER) {
+    return notify('Импорт из Google Диска появится после настройки доступа Google.');
+  }
+
+  loadGoogleIdentityServices().then(() => {
+    const tokenClient = window.google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: GOOGLE_DRIVE_FILE_SCOPE,
+      callback: async (response) => {
+        if (response.error || !response.access_token) return notify('Не удалось получить доступ к выбранным файлам Google Диска.');
+        try {
+          await openGoogleDrivePicker(response.access_token);
+        } catch {
+          notify('Не удалось открыть Google Диск. Проверьте интернет и настройки доступа.');
+        }
+      }
+    });
+    tokenClient.requestAccessToken({ prompt: 'consent' });
+  }).catch(() => notify('Не удалось подключиться к Google. Проверьте интернет и попробуйте ещё раз.'));
+}
+
+async function openGoogleDrivePicker(accessToken) {
+  await loadGooglePicker();
+  const picker = new window.google.picker.PickerBuilder()
+    .setAppId(GOOGLE_CLOUD_PROJECT_NUMBER)
+    .setDeveloperKey(GOOGLE_DRIVE_API_KEY)
+    .setOAuthToken(accessToken)
+    .setLocale('ru')
+    .addView(new window.google.picker.DocsView(window.google.picker.ViewId.DOCS)
+      .setMimeTypes('audio/mpeg,audio/mp4,audio/aac,audio/wav,audio/x-wav,audio/flac,audio/ogg,audio/webm,audio/opus'))
+    .enableFeature(window.google.picker.Feature.MULTISELECT_ENABLED)
+    .setCallback((data) => handleGoogleDrivePickerResult(data, accessToken))
+    .build();
+  picker.setVisible(true);
+}
+
+async function handleGoogleDrivePickerResult(data, accessToken) {
+  if (data[window.google.picker.Response.ACTION] !== window.google.picker.Action.PICKED) return;
+  const documents = data[window.google.picker.Response.DOCUMENTS] || [];
+  try {
+    const files = [];
+    for (const document of documents) {
+      const fileId = document[window.google.picker.Document.ID];
+      const name = document[window.google.picker.Document.NAME] || 'Аудиофайл';
+      const mimeType = document[window.google.picker.Document.MIME_TYPE] || '';
+      if (!fileId || !mimeType.startsWith('audio/')) throw new Error('not-audio-file');
+      const response = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      if (!response.ok) throw new Error('drive-download-failed');
+      const blob = await response.blob();
+      files.push(new File([blob], name, { type: mimeType || blob.type }));
+    }
+    await importFiles(files);
+  } catch (error) {
+    notify(error.message === 'not-audio-file' ? 'Выберите аудиофайлы из Google Диска.' : 'Не удалось загрузить выбранные аудиофайлы.');
+  }
 }
 
 async function prepareGoogleSignIn() {
@@ -473,16 +705,145 @@ async function importFiles(files) {
   }
 }
 
-async function checkForUpdates() {
-  if (!('serviceWorker' in navigator)) return notify('Автономний режим недоступний у цьому браузері.');
+let refreshRunning = false;
+let pullStart = null;
+let pullDistance = 0;
+const pullRefreshIndicator = $('#pull-refresh');
+const PULL_REFRESH_THRESHOLD = 86;
+
+function updatePullIndicator(distance, label) {
+  const offset = Math.min(92, Math.round(distance));
+  pullRefreshIndicator.style.setProperty('--pull-offset', `calc(-82px + ${offset}px)`);
+  pullRefreshIndicator.classList.toggle('pull-refresh--visible', distance > 6 || refreshRunning);
+  pullRefreshIndicator.setAttribute('aria-hidden', 'false');
+  pullRefreshIndicator.querySelector('.pull-refresh-label').textContent = label;
+}
+
+function resetPullIndicator() {
+  pullRefreshIndicator.classList.remove('pull-refresh--visible', 'pull-refresh--loading');
+  pullRefreshIndicator.style.removeProperty('--pull-offset');
+  pullRefreshIndicator.setAttribute('aria-hidden', 'true');
+  pullRefreshIndicator.querySelector('.pull-refresh-label').textContent = 'Потягніть вниз для оновлення';
+}
+
+function waitForWorkerActivation(worker, timeoutMs = 45000) {
+  if (worker.state === 'activated') return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(new Error('service-worker-timeout')), timeoutMs);
+    const onStateChange = () => {
+      if (worker.state === 'activated') finish();
+      else if (worker.state === 'redundant') finish(new Error('service-worker-redundant'));
+    };
+    const finish = (error) => {
+      clearTimeout(timer);
+      worker.removeEventListener('statechange', onStateChange);
+      if (error) reject(error);
+      else resolve();
+    };
+    worker.addEventListener('statechange', onStateChange);
+    onStateChange();
+  });
+}
+
+function askWorkerToRefreshShell(worker) {
+  return new Promise((resolve, reject) => {
+    if (!('MessageChannel' in window)) return reject(new Error('message-channel-unavailable'));
+    const channel = new MessageChannel();
+    const timer = setTimeout(() => {
+      channel.port1.close();
+      reject(new Error('refresh-timeout'));
+    }, 60000);
+    channel.port1.onmessage = (event) => {
+      clearTimeout(timer);
+      channel.port1.close();
+      resolve(event.data?.ok === true);
+    };
+    try {
+      worker.postMessage({ type: 'FORCE_REFRESH_OFFLINE_SHELL' }, [channel.port2]);
+    } catch (error) {
+      clearTimeout(timer);
+      channel.port1.close();
+      reject(error);
+    }
+  });
+}
+
+async function forceRefreshOfflineShell() {
+  if (refreshRunning) return;
+  refreshRunning = true;
+  pullRefreshIndicator.classList.add('pull-refresh--loading', 'pull-refresh--visible');
+  pullRefreshIndicator.setAttribute('aria-hidden', 'false');
+  pullRefreshIndicator.querySelector('.pull-refresh-label').textContent = 'Завантажуємо застосунок для офлайн…';
+
   try {
-    const registration = await navigator.serviceWorker.getRegistration();
-    if (!registration) return notify('Оновлення перевірятимуться автоматично під час запуску онлайн.');
+    if (!navigator.onLine) throw new Error('offline');
+    if (!('serviceWorker' in navigator)) throw new Error('service-worker-unavailable');
+
+    let registration = await navigator.serviceWorker.getRegistration();
+    if (!registration) registration = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' });
+    const previousWorker = registration.active;
     await registration.update();
-    notify(navigator.onLine ? 'Перевірку оновлень виконано.' : 'Ви офлайн — працює збережена версія.');
+
+    const installingWorker = registration.installing || registration.waiting;
+    if (installingWorker && installingWorker !== previousWorker) {
+      await waitForWorkerActivation(installingWorker);
+    } else {
+      const activeWorker = navigator.serviceWorker.controller || registration.active;
+      if (!activeWorker || !await askWorkerToRefreshShell(activeWorker)) throw new Error('shell-refresh-failed');
+    }
+
+    pullRefreshIndicator.querySelector('.pull-refresh-label').textContent = 'Готово. Перезапускаємо…';
+    notify('Офлайн-версію оновлено. Перезапускаємо застосунок…');
+    setTimeout(() => location.reload(), 350);
   } catch {
-    notify('Немає мережі — продовжуємо збережену версію.');
+    refreshRunning = false;
+    resetPullIndicator();
+    notify(navigator.onLine
+      ? 'Не вдалося оновити офлайн-кеш. Попередня версія та музика збережені.'
+      : 'Немає інтернету. Попередня версія та музика залишилися доступні офлайн.');
   }
+}
+
+content.addEventListener('touchstart', (event) => {
+  if (event.touches.length !== 1 || content.scrollTop > 0 || refreshRunning || $('#modal-root').childElementCount) return;
+  if (document.activeElement?.matches('input, textarea')) return;
+  pullStart = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+  pullDistance = 0;
+}, { passive: true });
+
+content.addEventListener('touchmove', (event) => {
+  if (!pullStart || event.touches.length !== 1 || content.scrollTop > 0) return;
+  const touch = event.touches[0];
+  const deltaY = touch.clientY - pullStart.y;
+  const deltaX = touch.clientX - pullStart.x;
+  if (Math.abs(deltaX) > Math.max(12, deltaY * 0.7)) {
+    pullStart = null;
+    pullDistance = 0;
+    resetPullIndicator();
+    return;
+  }
+  if (deltaY <= 0) return;
+  pullDistance = deltaY;
+  event.preventDefault();
+  updatePullIndicator(pullDistance, pullDistance >= PULL_REFRESH_THRESHOLD ? 'Відпустіть, щоб оновити' : 'Потягніть вниз для оновлення');
+}, { passive: false });
+
+content.addEventListener('touchend', () => {
+  const shouldRefresh = pullDistance >= PULL_REFRESH_THRESHOLD;
+  pullStart = null;
+  pullDistance = 0;
+  if (shouldRefresh) void forceRefreshOfflineShell();
+  else resetPullIndicator();
+}, { passive: true });
+
+content.addEventListener('touchcancel', () => {
+  pullStart = null;
+  pullDistance = 0;
+  resetPullIndicator();
+}, { passive: true });
+
+async function checkForUpdates() {
+  await forceRefreshOfflineShell();
 }
 
 document.addEventListener('click', async (event) => {
@@ -513,13 +874,11 @@ document.addEventListener('click', async (event) => {
       notify('Ви вийшли з акаунта в застосунку.');
       break;
     case 'import': $('#audio-import').click(); break;
+    case 'drive-import': importFromGoogleDrive(); break;
     case 'play-track': playTrack(allTracks().find((track) => track.id === id)); break;
     case 'toggle-play': playTrack(currentTrack()); break;
     case 'next-track': {
-      const list = allTracks().filter((track) => track.local);
-      if (!list.length) return notify('Спершу додайте аудіофайли.');
-      const index = list.findIndex((track) => track.id === state.currentTrackId);
-      await playTrack(list[(index + 1) % list.length] || list[0]);
+      await playNextTrack();
       break;
     }
     case 'play-list': {
@@ -552,19 +911,47 @@ document.addEventListener('click', async (event) => {
     case 'recent-search': state.searchText = term; render(); break;
     case 'song-menu': {
       const track = allTracks().find((item) => item.id === id);
-      if (track) {
-        if (state.favorites.includes(track.id)) {
-          state.favorites = state.favorites.filter((favorite) => favorite !== track.id);
-          notify('Вилучено з улюблених.');
-        } else {
-          state.favorites.push(track.id);
-          notify('Додано до улюблених.');
-        }
-        localStorage.setItem('muzika-favorites', JSON.stringify(state.favorites));
-        render();
-      } else notify('Додайте власний аудіофайл у медіатеку.');
+      if (track) openSongMenu(track);
+      else notify('Відкрийте меню поруч із піснею, щоб керувати нею.');
       break;
     }
+    case 'close-song-menu': closeSongMenu(); break;
+    case 'toggle-favorite': {
+      if (state.favorites.includes(id)) {
+        state.favorites = state.favorites.filter((favorite) => favorite !== id);
+        notify('Вилучено з улюблених.');
+      } else {
+        state.favorites.push(id);
+        notify('Додано до улюблених.');
+      }
+      localStorage.setItem('muzika-favorites', JSON.stringify(state.favorites));
+      closeSongMenu();
+      render();
+      break;
+    }
+    case 'toggle-pin': togglePinned(id); break;
+    case 'open-playlist-menu': {
+      const track = allTracks().find((item) => item.id === id);
+      if (track) openPlaylistMenu(track);
+      break;
+    }
+    case 'back-to-song-menu': {
+      const track = allTracks().find((item) => item.id === id);
+      if (track) openSongMenu(track);
+      break;
+    }
+    case 'add-to-favorites': addToFavorites(id); break;
+    case 'play-next': queueTrackNext(id); break;
+    case 'open-track-album': {
+      const track = allTracks().find((item) => item.id === id);
+      if (track) {
+        const album = albums.find((item) => item.title === track.album);
+        closeSongMenu();
+        pushScreen({ type: 'item', kind: 'album', id: album?.id || track.album });
+      }
+      break;
+    }
+    case 'delete-track': await deleteTrackFromLibrary(id); break;
     case 'station': notify(`«${title}» — радіостанції з’являться після підключення онлайн-каталогу.`); break;
     case 'recent': pushScreen({ type: 'item', kind: 'playlist', id: 'recent' }); break;
     case 'all-albums': pushScreen({ type: 'category', category: 'albums' }); break;
@@ -596,9 +983,7 @@ $('#audio-import').addEventListener('change', (event) => {
 });
 
 audio.addEventListener('ended', async () => {
-  const list = allTracks().filter((track) => track.local);
-  const index = list.findIndex((track) => track.id === state.currentTrackId);
-  await playTrack(list[(index + 1) % list.length] || list[0]);
+  await playNextTrack();
 });
 
 window.addEventListener('online', () => {
