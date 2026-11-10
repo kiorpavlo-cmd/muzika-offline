@@ -82,6 +82,9 @@ const categoryInfo = {
   songs: ['Пісні', 'music'],
   downloaded: ['Викачано', 'download']
 };
+const musicAlphabet = [...'АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ', '#'];
+const latinInitials = { A: 'А', B: 'Б', C: 'С', D: 'Д', E: 'Е', F: 'Ф', G: 'Г', H: 'Х', I: 'І', J: 'Й', K: 'К', L: 'Л', M: 'М', N: 'Н', O: 'О', P: 'П', Q: 'К', R: 'Р', S: 'С', T: 'Т', U: 'У', V: 'В', W: 'В', X: 'К', Y: 'Й', Z: 'З' };
+const musicCollator = new Intl.Collator('uk', { sensitivity: 'base', ignorePunctuation: true });
 
 const state = {
   tab: 'home',
@@ -173,6 +176,24 @@ function allTracks() {
   return [...tracks.filter((track) => !state.hiddenTracks.includes(track.id)), ...state.localTracks];
 }
 
+function musicLetter(value = '') {
+  const initial = String(value).trim().charAt(0).toLocaleUpperCase('uk');
+  if (latinInitials[initial]) return latinInitials[initial];
+  return musicAlphabet.includes(initial) ? initial : '#';
+}
+
+function sortTracksByArtist(list) {
+  return [...list].sort((first, second) => {
+    const firstLetter = musicLetter(first.artist);
+    const secondLetter = musicLetter(second.artist);
+    const letterOrder = musicAlphabet.indexOf(firstLetter) - musicAlphabet.indexOf(secondLetter);
+    if (letterOrder) return letterOrder;
+    const firstArtist = String(first.artist || '').trim().replace(/^[A-Za-z]/, (letter) => latinInitials[letter.toUpperCase()] || letter);
+    const secondArtist = String(second.artist || '').trim().replace(/^[A-Za-z]/, (letter) => latinInitials[letter.toUpperCase()] || letter);
+    return musicCollator.compare(firstArtist, secondArtist) || musicCollator.compare(first.title, second.title);
+  });
+}
+
 function prioritizePinned(list) {
   return [...list].sort((a, b) => Number(state.pinnedSongs.includes(b.id)) - Number(state.pinnedSongs.includes(a.id)));
 }
@@ -186,11 +207,12 @@ function songRow(track, index, options = {}) {
   const pinned = state.pinnedSongs.includes(track.id);
   const playing = state.currentTrackId === track.id && state.isPlaying;
   return `<div class="song-row" data-song-index="${index}">
+    ${options.leadingFavorite ? `<span class="song-leading-favorite" aria-hidden="true">${favorite ? '★' : ''}</span>` : ''}
     ${artMarkup(track.art, track.album, 'song-art')}
     <button class="song-main" data-action="play-track" data-id="${safeText(track.id)}" aria-label="Відтворити ${safeText(track.title)}">
       <span class="song-title">${safeText(track.title)}</span><span class="song-artist">${safeText(track.artist)}${options.showAlbum ? ` · ${safeText(track.album)}` : ''}</span>
     </button>
-    <span class="song-indicators">${favorite ? '<span class="favorite-mark">★</span>' : ''}${pinned ? icon('pin', 'pin-mark') : ''}${playing ? '<span class="playing-bars"><i></i><i></i><i></i></span>' : ''}</span>
+    <span class="song-indicators">${favorite && !options.leadingFavorite ? '<span class="favorite-mark">★</span>' : ''}${pinned && !options.hidePinned ? icon('pin', 'pin-mark') : ''}${playing ? '<span class="playing-bars"><i></i><i></i><i></i></span>' : ''}</span>
     <button class="icon-button song-more" data-action="song-menu" data-id="${safeText(track.id)}" aria-label="Додаткові дії">${icon('more')}</button>
   </div>`;
 }
@@ -403,8 +425,22 @@ function renderCategory() {
     rows = `<div class="alphabet" aria-hidden="true">${'АБВГДЕЄЖЗИІКЛМНОПРСТУФХЦЧШЩЬЮЯ#'.split('').map((char) => `<span>${char}</span>`).join('')}</div>${sorted.map((artist) => `<button class="entity-row" data-action="open-item" data-kind="artist" data-id="${safeText(artist.id)}">${artMarkup(artist.art, artist.title, 'entity-art entity-art--round')}<span>${safeText(artist.title)}</span>${icon('back', 'chevron')}</button>`).join('')}`;
   } else if (category === 'albums') {
     rows = `<div class="album-grid">${albums.slice(0, 10).map((album) => `<button class="album-card" data-action="open-item" data-kind="album" data-id="${safeText(album.id)}">${artMarkup(album.art, album.title)}<span class="album-title">${safeText(album.title)}</span><span class="album-subtitle">${safeText(album.artist)}</span></button>`).join('')}</div>`;
+  } else if (category === 'songs') {
+    const list = sortTracksByArtist(allTracks());
+    const groups = [];
+    list.forEach((track, index) => {
+      const letter = musicLetter(track.artist);
+      let group = groups.at(-1);
+      if (!group || group.letter !== letter) {
+        group = { letter, tracks: [] };
+        groups.push(group);
+      }
+      group.tracks.push({ track, index });
+    });
+    const alphabetIndex = `<nav class="alphabet alphabet--interactive" aria-label="Алфавітний покажчик">${musicAlphabet.map((letter) => `<button data-action="jump-letter" data-letter="${letter}" aria-label="Літера ${letter}">${letter}</button>`).join('')}</nav>`;
+    rows = `${alphabetIndex}${groups.map((group) => `<section class="song-letter-group" data-letter-group="${group.letter}"><h2 class="letter-heading">${group.letter}</h2><div class="song-list">${group.tracks.map(({ track, index }) => songRow(track, index, { leadingFavorite: true, hidePinned: true })).join('')}</div></section>`).join('')}`;
   } else {
-    const list = prioritizePinned(category === 'downloaded' ? allTracks().filter((track) => track.local) : allTracks());
+    const list = prioritizePinned(allTracks().filter((track) => track.local));
     rows = `<div class="song-list">${list.length ? list.map((track, i) => songRow(track, i, { showAlbum: category === 'downloaded' })).join('') : `<div class="empty-state">${category === 'downloaded' ? 'Тут з’явиться ваша музика, додана на пристрої.' : 'Додайте аудіофайли, щоб бачити свою медіатеку тут.'}</div>`}</div>`;
   }
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button>${category === 'songs' || category === 'albums' ? `<button class="header-pill" data-action="song-menu" data-id="${category}">${icon('menu')}<span class="pill-divider"></span>${icon('more')}</button>` : ''}</header>
@@ -861,6 +897,8 @@ function attachNowPlayingDrag(screen) {
 
 function render() {
   content.innerHTML = renderScreen();
+  content.classList.toggle('content--category-screen', state.screen.type === 'category');
+  content.classList.toggle('content--category-detail', state.screen.type === 'category' && ['songs', 'albums'].includes(state.screen.category));
   renderTabBar();
   renderPlayer();
   content.scrollTop = 0;
@@ -914,6 +952,17 @@ function pushScreen(screen) {
   state.screenStack.push({ ...state.screen, scrollTop: content.scrollTop });
   state.screen = screen;
   render();
+}
+
+function jumpToMusicLetter(letter) {
+  const groups = [...content.querySelectorAll('.song-letter-group')];
+  if (!groups.length) return;
+  const requestedIndex = musicAlphabet.indexOf(letter);
+  const destination = groups.find((group) => group.dataset.letterGroup === letter) ||
+    groups.find((group) => musicAlphabet.indexOf(group.dataset.letterGroup) >= requestedIndex) ||
+    groups.at(-1);
+  const scrollTop = content.scrollTop + destination.getBoundingClientRect().top - content.getBoundingClientRect().top - 8;
+  content.scrollTo({ top: Math.max(0, scrollTop), behavior: 'smooth' });
 }
 
 let backGesture = null;
@@ -1328,6 +1377,7 @@ document.addEventListener('click', async (event) => {
 
   switch (action) {
     case 'category': pushScreen({ type: 'category', category }); break;
+    case 'jump-letter': jumpToMusicLetter(button.dataset.letter); break;
     case 'open-item': pushScreen({ type: 'item', kind, id }); break;
     case 'back': navigateBack(); break;
     case 'settings': pushScreen({ type: 'settings' }); break;
