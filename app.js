@@ -52,6 +52,12 @@ const state = {
   screenStack: [],
   searchText: '',
   searchCategory: 'top',
+  youtubeResults: [],
+  youtubeSearchQuery: '',
+  youtubeSearchCategory: '',
+  youtubeSearchStatus: 'idle',
+  youtubeSearchError: '',
+  youtubeChannelId: '',
   recentSearches: JSON.parse(localStorage.getItem('muzika-searches') || '[]'),
   recentTrackIds: JSON.parse(localStorage.getItem('muzika-recent-tracks') || '[]'),
   favorites: JSON.parse(localStorage.getItem('muzika-favorites') || '[]'),
@@ -65,6 +71,11 @@ const state = {
   isPlaying: false,
   toastTimer: null
 };
+
+let youtubeSearchTimer = null;
+let youtubeSearchController = null;
+let youtubeSearchRequestId = 0;
+const YOUTUBE_API_KEY = window.MUZIKA_CONFIG?.youtubeApiKey || '';
 
 const database = {
   open() {
@@ -342,6 +353,147 @@ function renderSearch() {
     <div id="search-body">${renderSearchBody()}</div>`;
 }
 
+function refreshSearchResults() {
+  if (state.screen.type === 'tab' && state.screen.tab === 'search' && $('#search-body')) {
+    $('#search-body').innerHTML = renderSearchBody();
+  }
+}
+
+function cancelYouTubeSearch() {
+  clearTimeout(youtubeSearchTimer);
+  youtubeSearchController?.abort();
+  youtubeSearchController = null;
+  youtubeSearchRequestId += 1;
+  state.youtubeResults = [];
+  state.youtubeSearchQuery = '';
+  state.youtubeSearchCategory = '';
+  state.youtubeSearchStatus = 'idle';
+  state.youtubeSearchError = '';
+  state.youtubeChannelId = '';
+}
+
+function scheduleYouTubeSearch(query, category = state.searchCategory, { immediate = false, channelId = '' } = {}) {
+  const searchQuery = query.trim();
+  clearTimeout(youtubeSearchTimer);
+  youtubeSearchController?.abort();
+  youtubeSearchController = null;
+  youtubeSearchRequestId += 1;
+  state.youtubeChannelId = channelId;
+  state.youtubeResults = [];
+  state.youtubeSearchQuery = searchQuery;
+  state.youtubeSearchCategory = category;
+  state.youtubeSearchError = '';
+
+  if (searchQuery.length < 2) {
+    state.youtubeSearchStatus = 'idle';
+    refreshSearchResults();
+    return;
+  }
+
+  state.youtubeSearchStatus = 'loading';
+  refreshSearchResults();
+  const requestId = youtubeSearchRequestId;
+  youtubeSearchTimer = setTimeout(() => fetchYouTubeSearch(searchQuery, category, channelId, requestId), immediate ? 0 : 450);
+}
+
+async function fetchYouTubeSearch(query, category, channelId, requestId) {
+  if (!YOUTUBE_API_KEY) {
+    state.youtubeSearchStatus = 'error';
+    state.youtubeSearchError = 'Глобальний пошук ще не налаштований.';
+    refreshSearchResults();
+    return;
+  }
+  if (!navigator.onLine) {
+    state.youtubeSearchStatus = 'offline';
+    refreshSearchResults();
+    return;
+  }
+
+  const type = category === 'artists' ? 'channel' : category === 'albums' ? 'playlist' : 'video';
+  const parameters = new URLSearchParams({ part: 'snippet', q: query, type, maxResults: '20', key: YOUTUBE_API_KEY });
+  if (type === 'video') {
+    parameters.set('videoCategoryId', '10');
+    if (channelId) parameters.set('channelId', channelId);
+  }
+  const controller = new AbortController();
+  youtubeSearchController = controller;
+  try {
+    const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${parameters}`, { signal: controller.signal });
+    const payload = await response.json();
+    if (!response.ok) {
+      const reason = payload.error?.errors?.[0]?.reason || payload.error?.status || '';
+      const message = reason.toLowerCase().includes('quota')
+        ? 'Вичерпано денний ліміт пошуку YouTube. Спробуйте пізніше.'
+        : reason.toLowerCase().includes('referer')
+          ? 'Пошук доступний лише на опублікованому сайті. Оновіть сторінку GitHub Pages.'
+          : reason.toLowerCase().includes('key')
+            ? 'Не вдалося авторизувати пошук YouTube. Перевірте налаштування API.'
+            : 'Не вдалося завантажити результати YouTube. Перевірте інтернет і спробуйте ще раз.';
+      throw new Error(message);
+    }
+    if (requestId !== youtubeSearchRequestId) return;
+    state.youtubeResults = Array.isArray(payload.items) ? payload.items : [];
+    state.youtubeSearchStatus = 'ready';
+    state.youtubeSearchError = '';
+    refreshSearchResults();
+  } catch (error) {
+    if (error.name === 'AbortError' || requestId !== youtubeSearchRequestId) return;
+    state.youtubeSearchStatus = 'error';
+    state.youtubeSearchError = error.message || 'Не вдалося завантажити результати. Спробуйте ще раз.';
+    refreshSearchResults();
+  }
+}
+
+function youtubeResultRow(item) {
+  const resultKind = item.id?.videoId ? 'video' : item.id?.channelId ? 'channel' : 'playlist';
+  const id = item.id?.videoId || item.id?.channelId || item.id?.playlistId;
+  if (!id) return '';
+  const image = item.snippet?.thumbnails?.medium?.url || item.snippet?.thumbnails?.high?.url || item.snippet?.thumbnails?.default?.url || '';
+  const art = image.startsWith('https://') ? `<img class="song-art youtube-result-art ${resultKind === 'channel' ? 'youtube-result-art--round' : ''}" src="${safeText(image)}" alt="" loading="lazy">` : `<span class="song-art youtube-result-placeholder">${icon(resultKind === 'channel' ? 'artist' : resultKind === 'playlist' ? 'playlist' : 'music')}</span>`;
+  const label = resultKind === 'video' ? `Пісня · ${item.snippet?.channelTitle || 'YouTube'}` : resultKind === 'channel' ? 'Виконавець · YouTube' : `Плейлист · ${item.snippet?.channelTitle || 'YouTube'}`;
+  return `<div class="song-row search-song-row youtube-result-row">${art}<button class="song-main" data-action="open-youtube-result" data-kind="${resultKind}" data-id="${safeText(id)}"><span class="song-title">${safeText(item.snippet?.title || 'Без назви')}</span><span class="song-artist">${safeText(label)}</span></button><button class="icon-button song-more" data-action="youtube-result-menu" data-kind="${resultKind}" data-id="${safeText(id)}" aria-label="Додаткові дії">${icon('more')}</button></div>`;
+}
+
+function findYouTubeResult(kind, id) {
+  return state.youtubeResults.find((item) => {
+    const itemId = item.id?.videoId || item.id?.channelId || item.id?.playlistId;
+    const itemKind = item.id?.videoId ? 'video' : item.id?.channelId ? 'channel' : 'playlist';
+    return itemId === id && itemKind === kind;
+  });
+}
+
+function openYouTubePlayer(item) {
+  const id = item?.id?.videoId || item?.id?.playlistId;
+  if (!id || !/^[\w-]{8,80}$/.test(id)) return;
+  const playlist = Boolean(item.id?.playlistId);
+  const playerUrl = playlist
+    ? `https://www.youtube-nocookie.com/embed/videoseries?list=${encodeURIComponent(id)}&autoplay=1&playsinline=1`
+    : `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?autoplay=1&controls=1&playsinline=1`;
+  audio.pause();
+  const root = $('#modal-root');
+  root.innerHTML = `<div id="youtube-player-backdrop" class="action-modal youtube-player-backdrop"><section class="youtube-player-sheet" role="dialog" aria-modal="true" aria-label="Відтворення YouTube"><button class="account-close" data-action="close-youtube-player" aria-label="Закрити">${icon('close')}</button><div class="youtube-embed"><iframe src="${safeText(playerUrl)}" title="${safeText(item.snippet?.title || 'YouTube')}" allow="autoplay; encrypted-media; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></div><h2>${safeText(item.snippet?.title || 'YouTube')}</h2><p>${safeText(item.snippet?.channelTitle || 'YouTube')}</p></section></div>`;
+  root.querySelector('#youtube-player-backdrop').addEventListener('click', (event) => {
+    if (event.target.id === 'youtube-player-backdrop') closeYouTubePlayer();
+  });
+}
+
+function closeYouTubePlayer() {
+  $('#modal-root').innerHTML = '';
+}
+
+function openYouTubeResultMenu(item, kind, id) {
+  const isPlaylist = kind === 'playlist';
+  const externalUrl = isPlaylist ? `https://www.youtube.com/playlist?list=${encodeURIComponent(id)}` : kind === 'channel' ? `https://www.youtube.com/channel/${encodeURIComponent(id)}` : `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+  const image = item?.snippet?.thumbnails?.medium?.url || item?.snippet?.thumbnails?.default?.url || '';
+  const art = image.startsWith('https://') ? `<img class="action-art ${kind === 'channel' ? 'youtube-result-art--round' : ''}" src="${safeText(image)}" alt="" loading="lazy">` : `<span class="action-art">${icon(kind === 'channel' ? 'artist' : kind === 'playlist' ? 'playlist' : 'music')}</span>`;
+  const title = safeText(item?.snippet?.title || 'YouTube');
+  const subtitle = safeText(item?.snippet?.channelTitle || 'Результат пошуку');
+  $('#modal-root').innerHTML = `<div id="youtube-result-menu-backdrop" class="action-modal"><section class="action-sheet" role="dialog" aria-modal="true" aria-label="Дії з результатом YouTube"><div class="action-track-head">${art}<div class="youtube-menu-copy"><strong>${title}</strong><small>${subtitle}</small></div></div>${kind === 'channel' ? `<button class="song-action-row" data-action="search-youtube-channel" data-id="${safeText(id)}">${icon('music')}<span>Знайти пісні виконавця</span></button>` : `<button class="song-action-row" data-action="open-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('play')}<span>Відтворити</span></button>`}<a class="song-action-row youtube-external-action" href="${safeText(externalUrl)}" target="_blank" rel="noopener noreferrer">${icon('next')}<span>Відкрити на YouTube</span></a></section></div>`;
+  $('#youtube-result-menu-backdrop').addEventListener('click', (event) => {
+    if (event.target.id === 'youtube-result-menu-backdrop') closeYouTubePlayer();
+  });
+}
+
 function renderSearchBody() {
   const query = state.searchText.trim();
   if (!query) return `<div class="section-heading"><h2>Недавні пошуки</h2><button class="text-action text-action--red" data-action="clear-search">Очистити</button></div>
@@ -351,17 +503,21 @@ function renderSearchBody() {
   const tracks = prioritizePinned(allTracks().filter((track) => `${track.title} ${track.artist} ${track.album}`.toLocaleLowerCase().includes(normalizedQuery)));
   const artists = libraryArtists().filter((artist) => artist.title.toLocaleLowerCase().includes(normalizedQuery));
   const albums = libraryAlbums().filter((album) => `${album.title} ${album.artist}`.toLocaleLowerCase().includes(normalizedQuery));
-  const youtubeMusicUrl = `https://music.youtube.com/search?q=${encodeURIComponent(query)}`;
   const tabs = [['top', 'Найкращі результати'], ['artists', 'Виконавці'], ['albums', 'Альбоми']];
   const tabMarkup = `<nav class="search-tabs" role="tablist" aria-label="Категорії пошуку">${tabs.map(([key, title]) => `<button class="search-tab ${state.searchCategory === key ? 'search-tab--active' : ''}" role="tab" aria-selected="${state.searchCategory === key}" data-action="search-category" data-category="${key}">${title}</button>`).join('')}</nav>`;
   const artistRows = artists.map((artist) => `<button class="search-result-entity" data-action="open-item" data-kind="artist" data-id="${safeText(artist.id)}">${artMarkup(artist.art, artist.title, 'search-result-art search-result-art--round')}<span class="search-result-copy"><strong>${safeText(artist.title)}</strong><small>Виконавець</small></span>${icon('back', 'chevron')}</button>`).join('');
   const trackRows = tracks.map((track) => `<div class="song-row search-song-row">${artMarkup(track.art, track.album, 'song-art')}<button class="song-main" data-action="play-track" data-id="${safeText(track.id)}"><span class="song-title">${safeText(track.title)}${track.explicit ? '<span class="explicit-mark">E</span>' : ''}</span><span class="song-artist">Пісня · ${safeText(track.artist)}</span></button><button class="icon-button song-more" data-action="song-menu" data-id="${safeText(track.id)}" aria-label="Додаткові дії">${icon('more')}</button></div>`).join('');
   const albumRows = albums.map((album) => `<button class="search-result-entity" data-action="open-item" data-kind="album" data-id="${safeText(album.id)}">${artMarkup(album.art, album.title, 'search-result-art')}<span class="search-result-copy"><strong>${safeText(album.title)}</strong><small>Альбом · ${safeText(album.artist)}</small></span>${icon('back', 'chevron')}</button>`).join('');
-  const globalResult = `<a class="global-search-result" href="${safeText(youtubeMusicUrl)}" target="_blank" rel="noopener noreferrer"><span class="global-search-icon">${icon('search')}</span><span class="search-result-copy"><strong>${safeText(query)}</strong><small>Глобальні результати · YouTube Music</small></span>${icon('back', 'chevron')}</a>`;
+  const hasRemoteResults = state.youtubeSearchQuery === query && state.youtubeSearchCategory === state.searchCategory;
+  const remoteStatus = hasRemoteResults && state.youtubeSearchStatus === 'loading' ? '<div class="search-loading"><span></span>Пошук YouTube…</div>'
+    : hasRemoteResults && state.youtubeSearchStatus === 'offline' ? '<div class="empty-state">Немає інтернету. Показано результати з медіатеки пристрою.</div>'
+      : hasRemoteResults && state.youtubeSearchStatus === 'error' ? `<div class="empty-state">${safeText(state.youtubeSearchError)}</div>`
+        : hasRemoteResults && state.youtubeSearchStatus === 'ready' && !state.youtubeResults.length ? '<div class="empty-state">У YouTube нічого не знайдено.</div>' : '';
+  const remoteRows = hasRemoteResults && state.youtubeSearchStatus === 'ready' ? state.youtubeResults.map(youtubeResultRow).join('') : '';
   const localResults = state.searchCategory === 'artists' ? artistRows || '<div class="empty-state">Виконавців у медіатеці пристрою немає.</div>'
     : state.searchCategory === 'albums' ? albumRows || '<div class="empty-state">Альбомів у медіатеці пристрою немає.</div>'
-      : `${artistRows}${trackRows}${albumRows}${artistRows || trackRows || albumRows ? '' : '<div class="empty-state">Локальних збігів немає. Глобальний пошук доступний за першим рядком.</div>'}`;
-  return `${tabMarkup}<div class="search-result-list">${globalResult}${localResults}</div>`;
+      : `${artistRows}${trackRows}${albumRows}${artistRows || trackRows || albumRows ? '' : '<div class="empty-state">Збігів у медіатеці пристрою немає.</div>'}`;
+  return `${tabMarkup}<div class="search-result-list">${remoteRows}${remoteStatus}${localResults}</div>`;
 }
 
 function renderItemScreen() {
@@ -787,10 +943,12 @@ function rememberSearch(term) {
 }
 
 function navigateTab(tab) {
+  if (tab !== 'search') cancelYouTubeSearch();
   state.tab = tab;
   state.screenStack = [];
   state.screen = { type: 'tab', tab };
   render();
+  if (tab === 'search' && state.searchText.trim()) scheduleYouTubeSearch(state.searchText, state.searchCategory, { immediate: true });
 }
 
 function canStartBackGesture() {
@@ -1282,11 +1440,13 @@ document.addEventListener('click', async (event) => {
     case 'clear-search': state.recentSearches = []; localStorage.removeItem('muzika-searches'); render(); break;
     case 'close-search':
       if (state.searchText.trim()) {
+        cancelYouTubeSearch();
         state.searchText = '';
         state.searchCategory = 'top';
         render();
         $('#search-input')?.focus({ preventScroll: true });
       } else {
+        cancelYouTubeSearch();
         state.searchCategory = 'top';
         state.tab = 'home';
         state.screenStack = [];
@@ -1294,8 +1454,30 @@ document.addEventListener('click', async (event) => {
         render();
       }
       break;
-    case 'recent-search': state.searchText = term; state.searchCategory = 'top'; render(); break;
-    case 'search-category': state.searchCategory = button.dataset.category; $('#search-body').innerHTML = renderSearchBody(); break;
+    case 'recent-search': state.searchText = term; state.searchCategory = 'top'; render(); scheduleYouTubeSearch(term, 'top', { immediate: true }); break;
+    case 'search-category': state.searchCategory = button.dataset.category; $('#search-body').innerHTML = renderSearchBody(); scheduleYouTubeSearch(state.searchText, state.searchCategory, { immediate: true }); break;
+    case 'open-youtube-result': {
+      const item = findYouTubeResult(kind, id);
+      if (!item) break;
+      if (kind === 'channel') {
+        state.searchText = item.snippet?.title || state.searchText;
+        state.searchCategory = 'top';
+        render();
+        scheduleYouTubeSearch(state.searchText, 'top', { immediate: true, channelId: id });
+      } else openYouTubePlayer(item);
+      break;
+    }
+    case 'youtube-result-menu': openYouTubeResultMenu(findYouTubeResult(kind, id), kind, id); break;
+    case 'search-youtube-channel': {
+      const item = findYouTubeResult('channel', id);
+      if (!item) break;
+      state.searchText = item.snippet?.title || state.searchText;
+      state.searchCategory = 'top';
+      render();
+      scheduleYouTubeSearch(state.searchText, 'top', { immediate: true, channelId: id });
+      break;
+    }
+    case 'close-youtube-player': closeYouTubePlayer(); break;
     case 'song-menu': {
       const track = allTracks().find((item) => item.id === id);
       if (track) openSongMenu(track);
@@ -1365,7 +1547,7 @@ content.addEventListener('input', (event) => {
   if (event.target.id !== 'search-input') return;
   state.searchText = event.target.value;
   state.searchCategory = 'top';
-  $('#search-body').innerHTML = renderSearchBody();
+  scheduleYouTubeSearch(state.searchText, 'top');
 });
 
 content.addEventListener('keydown', (event) => {
@@ -1373,7 +1555,7 @@ content.addEventListener('keydown', (event) => {
     const query = state.searchText.trim();
     if (query) {
       rememberSearch(query);
-      window.open(`https://music.youtube.com/search?q=${encodeURIComponent(query)}`, '_blank', 'noopener,noreferrer');
+      scheduleYouTubeSearch(query, state.searchCategory, { immediate: true });
     }
     event.target.blur();
   }
