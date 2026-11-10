@@ -612,10 +612,11 @@ function openYouTubeResultMenu(item, kind, id) {
   const channelId = item.snippet?.channelId || (kind === 'channel' ? id : '');
   const channelTitle = safeText(item.snippet?.channelTitle || item.snippet?.title || '');
   const quickActions = `<div class="youtube-menu-quick"><button class="youtube-menu-quick-action" data-action="save-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('plusCircle')}<span>${inLibrary ? 'У медіатеці' : 'Додати'}</span></button><button class="youtube-menu-quick-action" data-action="toggle-youtube-favorite" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('star', isFavorite ? 'youtube-favorite-active' : '')}<span>${isFavorite ? 'В улюблених' : 'Додати до улюблених'}</span></button><button class="youtube-menu-quick-action" data-action="share-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('share')}<span>Поширити</span></button></div>`;
+  const downloadAction = kind === 'video' ? `<div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="open-youtube-download" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('download')}<span>Завантажити</span></button></div>` : '';
   const playlistActions = `<div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="open-youtube-playlist-menu" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('playlistAdd')}<span>Додати до підбірки</span></button>${kind === 'video' ? `<button class="song-action-row youtube-menu-row" data-action="queue-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('queue')}<span>Відтворити далі</span></button><button class="song-action-row youtube-menu-row" data-action="youtube-create-station" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('station')}<span>Створити станцію</span></button>` : `<button class="song-action-row youtube-menu-row" data-action="open-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('play')}<span>Відтворити</span></button>`}</div>`;
   const creatorActions = `<div class="youtube-menu-group">${kind === 'video' ? `<button class="song-action-row youtube-menu-row" data-action="youtube-search-albums" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('albumFile')}<span>Перейти до альбому</span></button>` : ''}<button class="song-action-row youtube-menu-row" data-action="youtube-open-channel" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('artist')}<span>Перейти до виконавця</span></button><button class="song-action-row youtube-menu-row" data-action="youtube-about-creator" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('info')}<span>Переглянути дані про автора</span></button></div>`;
   const feedback = `<div class="youtube-menu-group youtube-menu-group--last"><button class="song-action-row youtube-menu-row" data-action="youtube-suggest-less" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('dislike')}<span>Пропонувати менше</span></button></div>`;
-  $('#modal-root').innerHTML = `<div id="youtube-result-menu-backdrop" class="action-modal"><section class="action-sheet youtube-action-sheet" role="dialog" aria-modal="true" aria-label="Дії з результатом пошуку"><div class="action-track-head">${art}<div class="youtube-menu-copy"><strong>${title}</strong><small>${subtitle}</small></div></div>${quickActions}${playlistActions}${creatorActions}${feedback}</section></div>`;
+  $('#modal-root').innerHTML = `<div id="youtube-result-menu-backdrop" class="action-modal"><section class="action-sheet youtube-action-sheet" role="dialog" aria-modal="true" aria-label="Дії з результатом пошуку"><div class="action-track-head">${art}<div class="youtube-menu-copy"><strong>${title}</strong><small>${subtitle}</small></div></div>${quickActions}${downloadAction}${playlistActions}${creatorActions}${feedback}</section></div>`;
   $('#youtube-result-menu-backdrop').addEventListener('click', (event) => {
     if (event.target.id === 'youtube-result-menu-backdrop') closeSongMenu();
   });
@@ -1625,6 +1626,15 @@ document.addEventListener('click', async (event) => {
       break;
     }
     case 'youtube-result-menu': openYouTubeResultMenu(findYouTubeResult(kind, id), kind, id); break;
+    case 'open-youtube-download': {
+      const item = findYouTubeResult(kind, id);
+      const videoId = kind === 'video' ? item?.id?.videoId || id : '';
+      if (!videoId) break;
+      window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, '_blank', 'noopener,noreferrer');
+      closeSongMenu();
+      notify('Відкриваємо YouTube. Якщо для відео доступне «Завантажити», воно збережеться в YouTube, а не в медіатеці цього застосунку.');
+      break;
+    }
     case 'save-youtube-result': saveYouTubeResult(findYouTubeResult(kind, id), kind, id); break;
     case 'toggle-youtube-favorite': toggleYouTubeFavorite(findYouTubeResult(kind, id), kind, id); break;
     case 'share-youtube-result': await shareYouTubeResult(findYouTubeResult(kind, id), kind, id); break;
