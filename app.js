@@ -9,10 +9,10 @@ const icons = {
   music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3" fill="currentColor"/><circle cx="18" cy="16" r="3" fill="currentColor"/>',
   down: '<path d="m6 9 6 6 6-6"/>',
   volume: '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7m2.8-9.8a9 9 0 0 1 0 12.6"/>',
-  library: '<path d="M6 5h12M4 9h16M5 13h14v7H5z"/><path d="M9 3h6"/>',
+  library: '<path d="M8 3h8v1.5H8zM6 5.5h12v2H6zM7 8.5h10a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z" fill="currentColor" stroke="none"/><path d="M13.5 16v-5l3.5-.7v5" fill="none" stroke="#111113" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12.5" cy="17" r="1.7" fill="#111113" stroke="none"/><circle cx="15.5" cy="15.5" r="1.7" fill="#111113" stroke="none"/>',
   search: '<circle cx="10.8" cy="10.8" r="7.1"/><path d="m16 16 5 5"/>',
   back: '<path d="m15 18-6-6 6-6"/>',
-  next: '<path d="M5 5v14l10-7zM19 5v14" fill="currentColor"/>',
+  next: '<path d="M3 5v14l8-7zM12 5v14l8-7z" fill="currentColor" stroke="none"/>',
   play: '<path d="m7 4 13 8-13 8z" fill="currentColor" stroke="none"/>',
   pause: '<path d="M7 5h4v14H7zM15 5h4v14h-4z" fill="currentColor" stroke="none"/>',
   shuffle: '<path d="m16 3 4 4-4 4M4 7h3c5 0 5 10 10 10h3M16 14l4 3-4 4M4 17h3c1.3 0 2.2-.8 3-1.8M14 8c.8-.7 1.7-1 3-1"/>',
@@ -628,7 +628,7 @@ function renderScreen() {
 
 function renderTabBar() {
   const tabs = [
-    ['home', 'Домівка', 'home'], ['new', 'Новинки', 'grid'], ['radio', 'Радіо', 'radio'], ['library', 'Медіатека', 'music'], ['search', 'Пошук', 'search']
+    ['home', 'Домівка', 'home'], ['new', 'Новинки', 'grid'], ['radio', 'Радіо', 'radio'], ['library', 'Медіатека', 'library'], ['search', 'Пошук', 'search']
   ];
   $('#tab-bar').innerHTML = tabs.map(([id, label, glyph]) => `<button class="tab-button ${state.tab === id ? 'active' : ''}" data-tab="${id}">${icon(glyph)}<span>${label}</span></button>`).join('');
 }
