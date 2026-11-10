@@ -7,6 +7,8 @@ const icons = {
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   radio: '<circle cx="12" cy="12" r="1.8" fill="currentColor" stroke="none"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.5 4.5a10.5 10.5 0 0 0 0 15M19.5 4.5a10.5 10.5 0 0 1 0 15"/>',
   music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3" fill="currentColor"/><circle cx="18" cy="16" r="3" fill="currentColor"/>',
+  down: '<path d="m6 9 6 6 6-6"/>',
+  volume: '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7m2.8-9.8a9 9 0 0 1 0 12.6"/>',
   library: '<path d="M6 5h12M4 9h16M5 13h14v7H5z"/><path d="M9 3h6"/>',
   search: '<circle cx="10.8" cy="10.8" r="7.1"/><path d="m16 16 5 5"/>',
   back: '<path d="m15 18-6-6 6-6"/>',
@@ -246,6 +248,18 @@ async function playNextTrack() {
   if (!list.length) return notify('Спершу додайте аудіофайл у медіатеку.');
   const index = list.findIndex((track) => track.id === state.currentTrackId);
   await playTrack(list[(index + 1) % list.length] || list[0]);
+}
+
+async function playPreviousTrack() {
+  if (currentTrack().local && audio.currentTime > 3) {
+    audio.currentTime = 0;
+    syncNowPlayingPlayback();
+    return;
+  }
+  const list = allTracks().filter((track) => track.local);
+  if (!list.length) return notify('Спершу додайте аудіофайл у медіатеку.');
+  const index = list.findIndex((track) => track.id === state.currentTrackId);
+  await playTrack(list[(index - 1 + list.length) % list.length]);
 }
 
 async function deleteTrackFromLibrary(trackId) {
@@ -618,6 +632,216 @@ function renderPlayer() {
   $('#mini-player').innerHTML = `<button class="player-track" data-action="now-playing">${artMarkup(track.art, track.album, 'player-art')}<span class="player-copy"><strong>${safeText(track.title)}</strong><small>${safeText(track.artist)}</small></span></button><button class="player-control" data-action="toggle-play" aria-label="${state.isPlaying ? 'Пауза' : 'Відтворити'}">${icon(state.isPlaying ? 'pause' : 'play')}</button><button class="player-control player-next" data-action="next-track" aria-label="Наступна пісня">${icon('next')}</button>`;
 }
 
+function formatPlayerTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+}
+
+function renderNowPlayingScreen() {
+  const track = currentTrack();
+  const playable = Boolean(track.local);
+  const duration = playable && Number.isFinite(audio.duration) ? audio.duration : 0;
+  const progress = duration ? Math.min(100, audio.currentTime / duration * 100) : 0;
+  return `<div class="now-playing-backdrop"></div>
+    <section id="now-playing-screen" class="now-playing-screen" role="dialog" aria-modal="true" aria-label="Зараз відтворюється">
+      <header class="now-playing-header now-playing-drag-zone">
+        <button class="now-playing-close" data-action="close-now-playing" aria-label="Згорнути плеєр">${icon('down')}</button>
+        <span class="now-playing-header-title">ЗАРАЗ ВІДТВОРЮЄТЬСЯ</span>
+        <button class="now-playing-more" data-action="player-queue" aria-label="Черга відтворення">${icon('more')}</button>
+      </header>
+      <div class="now-playing-content">
+        <div class="now-playing-art-wrap now-playing-drag-zone">${artMarkup(track.art, track.album, 'now-playing-art')}</div>
+        <div class="now-playing-track-info">
+          <div class="now-playing-copy"><strong>${safeText(track.title)}</strong><span>${safeText(track.artist)}</span></div>
+          <button class="now-playing-favorite" data-action="toggle-player-favorite" aria-label="${state.favorites.includes(track.id) ? 'Вилучити з улюблених' : 'Додати до улюблених'}">${icon('star', state.favorites.includes(track.id) ? 'is-favorite' : '')}</button>
+        </div>
+        <div class="now-playing-progress-block">
+          <input id="player-progress" class="player-range" type="range" min="0" max="${duration || 0}" step="0.1" value="${Math.min(audio.currentTime || 0, duration)}" style="--range-progress:${progress}%" aria-label="Позиція відтворення" ${playable && duration ? '' : 'disabled'}>
+          <div class="now-playing-times"><span id="player-current-time">${formatPlayerTime(playable ? audio.currentTime : 0)}</span><span>${duration ? formatPlayerTime(duration) : '–:––'}</span></div>
+        </div>
+        <div class="now-playing-controls">
+          <button class="now-playing-secondary" data-action="previous-track" aria-label="Попередня пісня">${icon('next', 'is-reversed')}</button>
+          <button id="now-playing-toggle" class="now-playing-toggle" data-action="toggle-play" aria-label="${state.isPlaying ? 'Пауза' : 'Відтворити'}">${icon(state.isPlaying ? 'pause' : 'play')}</button>
+          <button class="now-playing-secondary" data-action="next-track" aria-label="Наступна пісня">${icon('next')}</button>
+        </div>
+        <div class="now-playing-volume-row"><span>${icon('volume')}</span><input id="player-volume" class="player-range player-volume" type="range" min="0" max="1" step="0.01" value="${audio.volume}" aria-label="Гучність" ${playable ? '' : 'disabled'}><span>${icon('volume', 'volume-high')}</span></div>
+        <p class="now-playing-note ${playable ? 'now-playing-note--ready' : ''}">${playable ? 'Офлайн-аудіо збережено на цьому пристрої' : 'Додайте аудіофайл, щоб слухати офлайн'}</p>
+      </div>
+      <div class="now-playing-home-indicator" aria-hidden="true"></div>
+    </section>`;
+}
+
+let nowPlayingClosing = false;
+
+function openNowPlaying() {
+  const root = $('#player-root');
+  if (root.firstElementChild) return;
+  root.innerHTML = `<div id="now-playing-root" class="now-playing-root">${renderNowPlayingScreen()}</div>`;
+  const screen = $('#now-playing-screen');
+  const source = $('#mini-player .player-art');
+  const target = root.querySelector('.now-playing-art');
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let sharedArtAnimation = null;
+
+  if (source && target && !reducedMotion) {
+    screen.classList.add('is-shared-art-hidden');
+    sharedArtAnimation = animateArtworkTransition(source, target, true);
+  }
+
+  requestAnimationFrame(() => {
+    $('#now-playing-root')?.classList.add('is-open');
+    $('#now-playing-screen')?.classList.add('is-open');
+  });
+  if (sharedArtAnimation) sharedArtAnimation.finally(() => screen.classList.remove('is-shared-art-hidden'));
+
+  root.querySelector('[data-action="close-now-playing"]').addEventListener('click', (event) => {
+    event.stopPropagation();
+    closeNowPlaying();
+  });
+  root.querySelector('.now-playing-backdrop').addEventListener('click', closeNowPlaying);
+  attachNowPlayingDrag(screen);
+  syncNowPlayingPlayback();
+}
+
+function animateArtworkTransition(source, target, opening) {
+  const shell = $('.app-shell');
+  const from = source.getBoundingClientRect();
+  const to = target.getBoundingClientRect();
+  const shellHeight = shell?.getBoundingClientRect().height || window.innerHeight;
+  const origin = from;
+  const goal = { left: to.left, top: opening ? to.top - shellHeight : to.top, width: to.width, height: to.height };
+  const clone = source.cloneNode(true);
+  if (opening) {
+    clone.classList.remove('player-art');
+    clone.classList.add('now-playing-art');
+  }
+  clone.removeAttribute('aria-label');
+  Object.assign(clone.style, {
+    position: 'fixed', left: `${origin.left}px`, top: `${origin.top}px`, width: `${origin.width}px`, height: `${origin.height}px`,
+    margin: '0', zIndex: '1000', pointerEvents: 'none', transformOrigin: 'top left', willChange: 'transform,border-radius'
+  });
+  document.body.append(clone);
+  const x = goal.left - origin.left;
+  const y = goal.top - origin.top;
+  const scaleX = goal.width / origin.width;
+  const scaleY = goal.height / origin.height;
+  const animation = clone.animate([
+    { transform: 'translate(0, 0) scale(1, 1)', borderRadius: opening ? '7px' : '18px' },
+    { transform: `translate(${x}px, ${y}px) scale(${scaleX}, ${scaleY})`, borderRadius: opening ? '18px' : '7px' }
+  ], { duration: 520, easing: 'cubic-bezier(.22, 1, .36, 1)', fill: 'forwards' });
+  return animation.finished.catch(() => {}).finally(() => clone.remove());
+}
+
+function closeNowPlaying() {
+  const root = $('#now-playing-root');
+  const screen = $('#now-playing-screen');
+  if (!root || !screen || nowPlayingClosing) return;
+  nowPlayingClosing = true;
+  const expandedArt = $('#player-root .now-playing-art');
+  const miniArt = $('#mini-player .player-art');
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let sharedArtAnimation = null;
+  if (expandedArt && miniArt && !reducedMotion) {
+    screen.classList.add('is-shared-art-hidden');
+    sharedArtAnimation = animateArtworkTransition(expandedArt, miniArt, false);
+  }
+  root.classList.remove('is-open');
+  screen.classList.remove('is-open');
+  const finish = () => {
+    $('#player-root').innerHTML = '';
+    nowPlayingClosing = false;
+  };
+  if (sharedArtAnimation) sharedArtAnimation.finally(finish);
+  else setTimeout(finish, reducedMotion ? 80 : 470);
+}
+
+function syncNowPlayingPlayback() {
+  const button = $('#now-playing-toggle');
+  const track = currentTrack();
+  if (button) {
+    button.innerHTML = icon(state.isPlaying ? 'pause' : 'play');
+    button.setAttribute('aria-label', state.isPlaying ? 'Пауза' : 'Відтворити');
+  }
+  const currentTime = $('#player-current-time');
+  if (currentTime) currentTime.textContent = formatPlayerTime(track.local ? audio.currentTime : 0);
+  const progress = $('#player-progress');
+  if (progress && track.local) {
+    const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+    progress.max = String(duration);
+    progress.value = String(Math.min(audio.currentTime || 0, duration));
+    progress.style.setProperty('--range-progress', `${duration ? audio.currentTime / duration * 100 : 0}%`);
+    progress.disabled = !duration;
+    const totalTime = $('.now-playing-times span:last-child');
+    if (totalTime) totalTime.textContent = duration ? formatPlayerTime(duration) : '–:––';
+  }
+}
+
+function syncNowPlayingTrack() {
+  const track = currentTrack();
+  const artwork = $('.now-playing-art-wrap');
+  const copy = $('.now-playing-copy');
+  const favoriteButton = $('.now-playing-favorite');
+  const note = $('.now-playing-note');
+  const progress = $('#player-progress');
+  const volume = $('#player-volume');
+  if (!artwork) return;
+  artwork.innerHTML = artMarkup(track.art, track.album, 'now-playing-art');
+  if (copy) copy.innerHTML = `<strong>${safeText(track.title)}</strong><span>${safeText(track.artist)}</span>`;
+  if (favoriteButton) {
+    const favorite = state.favorites.includes(track.id);
+    favoriteButton.innerHTML = icon('star', favorite ? 'is-favorite' : '');
+    favoriteButton.setAttribute('aria-label', favorite ? 'Вилучити з улюблених' : 'Додати до улюблених');
+  }
+  if (note) {
+    note.textContent = track.local ? 'Офлайн-аудіо збережено на цьому пристрої' : 'Додайте аудіофайл, щоб слухати офлайн';
+    note.classList.toggle('now-playing-note--ready', Boolean(track.local));
+  }
+  if (progress) progress.disabled = !track.local;
+  if (volume) volume.disabled = !track.local;
+  syncNowPlayingPlayback();
+}
+
+function attachNowPlayingDrag(screen) {
+  let startY = null;
+  let lastY = null;
+  let lastTime = 0;
+  screen.addEventListener('pointerdown', (event) => {
+    if (!event.target.closest('.now-playing-drag-zone') || event.target.closest('button') || event.button !== 0) return;
+    startY = event.clientY;
+    lastY = event.clientY;
+    lastTime = performance.now();
+    screen.setPointerCapture?.(event.pointerId);
+  });
+  screen.addEventListener('pointermove', (event) => {
+    if (startY === null) return;
+    const distance = Math.max(0, event.clientY - startY);
+    const now = performance.now();
+    screen.style.transition = 'none';
+    screen.style.transform = `translateY(${distance}px)`;
+    $('#now-playing-root')?.style.setProperty('--player-backdrop-opacity', String(Math.max(.16, 1 - distance / window.innerHeight)));
+    screen.dataset.dragVelocity = String((event.clientY - lastY) / Math.max(1, now - lastTime));
+    lastY = event.clientY;
+    lastTime = now;
+  });
+  screen.addEventListener('pointerup', () => {
+    if (startY === null) return;
+    const distance = Math.max(0, lastY - startY);
+    const velocity = Number(screen.dataset.dragVelocity || 0);
+    startY = null;
+    screen.style.transition = '';
+    screen.style.transform = '';
+    $('#now-playing-root')?.style.removeProperty('--player-backdrop-opacity');
+    if (distance > 115 || velocity > .65) closeNowPlaying();
+  });
+  screen.addEventListener('pointercancel', () => {
+    startY = null;
+    screen.style.transition = '';
+    screen.style.transform = '';
+    $('#now-playing-root')?.style.removeProperty('--player-backdrop-opacity');
+  });
+}
+
 function render() {
   content.innerHTML = renderScreen();
   renderTabBar();
@@ -667,12 +891,18 @@ async function playTrack(track) {
     audio.pause();
     state.isPlaying = false;
     renderPlayer();
+    syncNowPlayingPlayback();
     return;
   }
-  state.currentTrackId = track.id;
-  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
-  state.audioUrl = URL.createObjectURL(track.file);
-  audio.src = state.audioUrl;
+  if (state.currentTrackId !== track.id || !state.audioUrl) {
+    state.currentTrackId = track.id;
+    syncNowPlayingTrack();
+    if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
+    state.audioUrl = URL.createObjectURL(track.file);
+    audio.src = state.audioUrl;
+  } else if (audio.ended) {
+    audio.currentTime = 0;
+  }
   try {
     await audio.play();
     state.isPlaying = true;
@@ -1015,9 +1245,21 @@ document.addEventListener('click', async (event) => {
     case 'station': notify(`«${title}» — радіостанції з’являться після підключення онлайн-каталогу.`); break;
     case 'recent': pushScreen({ type: 'item', kind: 'playlist', id: 'recent' }); break;
     case 'all-albums': pushScreen({ type: 'category', category: 'albums' }); break;
-    case 'now-playing': {
-      if (currentTrack().local) notify('Зараз відтворюється ваша офлайн-пісня.');
-      else notify('Додайте власні аудіофайли, щоб слухати їх офлайн.');
+    case 'now-playing': openNowPlaying(); break;
+    case 'close-now-playing': closeNowPlaying(); break;
+    case 'previous-track': await playPreviousTrack(); break;
+    case 'player-queue': notify(state.queue.length ? `У черзі: ${state.queue.length} пісень.` : 'Черга відтворення порожня.'); break;
+    case 'toggle-player-favorite': {
+      const track = currentTrack();
+      if (state.favorites.includes(track.id)) state.favorites = state.favorites.filter((favorite) => favorite !== track.id);
+      else state.favorites.push(track.id);
+      localStorage.setItem('muzika-favorites', JSON.stringify(state.favorites));
+      const favoriteButton = $('#player-root .now-playing-favorite');
+      if (favoriteButton) {
+        const favorite = state.favorites.includes(track.id);
+        favoriteButton.innerHTML = icon('star', favorite ? 'is-favorite' : '');
+        favoriteButton.setAttribute('aria-label', favorite ? 'Вилучити з улюблених' : 'Додати до улюблених');
+      }
       break;
     }
     case 'check-updates': checkForUpdates(); break;
@@ -1037,6 +1279,20 @@ content.addEventListener('keydown', (event) => {
   }
 });
 
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && $('#now-playing-root')) closeNowPlaying();
+});
+
+$('#player-root').addEventListener('input', (event) => {
+  if (event.target.id === 'player-progress' && currentTrack().local) {
+    audio.currentTime = Number(event.target.value);
+    event.target.style.setProperty('--range-progress', `${audio.duration ? audio.currentTime / audio.duration * 100 : 0}%`);
+    const time = $('#player-current-time');
+    if (time) time.textContent = formatPlayerTime(audio.currentTime);
+  }
+  if (event.target.id === 'player-volume') audio.volume = Number(event.target.value);
+});
+
 $('#audio-import').addEventListener('change', (event) => {
   importFiles(event.target.files || []);
   event.target.value = '';
@@ -1044,6 +1300,19 @@ $('#audio-import').addEventListener('change', (event) => {
 
 audio.addEventListener('ended', async () => {
   await playNextTrack();
+});
+audio.addEventListener('timeupdate', syncNowPlayingPlayback);
+audio.addEventListener('loadedmetadata', syncNowPlayingPlayback);
+audio.addEventListener('durationchange', syncNowPlayingPlayback);
+audio.addEventListener('play', () => {
+  state.isPlaying = true;
+  renderPlayer();
+  syncNowPlayingPlayback();
+});
+audio.addEventListener('pause', () => {
+  state.isPlaying = false;
+  renderPlayer();
+  syncNowPlayingPlayback();
 });
 
 window.addEventListener('online', () => {
