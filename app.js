@@ -85,6 +85,9 @@ const state = {
   searchScope: 'catalog',
   recentSearches: JSON.parse(localStorage.getItem('muzika-searches') || '[]'),
   favorites: JSON.parse(localStorage.getItem('muzika-favorites') || '["t1","t8"]'),
+  googleProfile: (() => {
+    try { return JSON.parse(localStorage.getItem('muzika-google-profile') || 'null'); } catch { return null; }
+  })(),
   localTracks: [],
   currentTrackId: 't2',
   isPlaying: false,
@@ -254,12 +257,110 @@ function renderCategory() {
 
 function renderSettings() {
   const online = navigator.onLine;
+  const profile = state.googleProfile;
+  const initials = profile?.name ? profile.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase() : 'ПК';
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><h2>Налаштування</h2><span></span></header>
-    <div class="settings-profile"><div class="profile-button profile-button--large">ПК</div><div><strong>Моя медіатека</strong><small>Зберігається на цьому пристрої</small></div></div>
+    <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name)}` : 'Войти через Google'}"><span class="profile-button profile-button--large">${safeText(initials)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
     <div class="settings-group"><div class="settings-row"><span>Стан мережі</span><strong class="${online ? 'online-label' : 'offline-label'}">${online ? 'Підключено' : 'Офлайн'}</strong></div><div class="settings-row"><span>Оновлення застосунку</span><button data-action="check-updates">Перевірити</button></div><div class="settings-row"><span>Офлайн-аудіо</span><strong>${state.localTracks.length} пісень</strong></div></div>
     <button class="import-panel" data-action="import">${icon('plus')}<span><strong>Додати аудіофайли</strong><small>Файли залишаються лише на вашому пристрої</small></span>${icon('back', 'chevron')}</button>
     <a class="import-panel profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>
     <p class="settings-note">Оновлення інтерфейсу завантажуються автоматично під час запуску, коли є інтернет. Збережена музика та сам застосунок доступні офлайн.</p>`;
+}
+
+const GOOGLE_CLIENT_ID = document.querySelector('meta[name="google-client-id"]')?.content.trim() || '';
+let googleIdentityPromise;
+let googleIdentityInitialized = false;
+
+function closeGoogleAccount() {
+  $('#modal-root').innerHTML = '';
+}
+
+function decodeGoogleProfile(credential) {
+  try {
+    const part = credential.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = part + '='.repeat((4 - part.length % 4) % 4);
+    const bytes = Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+    const claims = JSON.parse(new TextDecoder().decode(bytes));
+    if (!claims.sub || !claims.email) return null;
+    return { id: claims.sub, name: claims.name || claims.email, email: claims.email };
+  } catch {
+    return null;
+  }
+}
+
+function handleGoogleCredential(response) {
+  const profile = decodeGoogleProfile(response.credential || '');
+  if (!profile) return notify('Не удалось получить профиль Google. Попробуйте ещё раз.');
+  state.googleProfile = profile;
+  localStorage.setItem('muzika-google-profile', JSON.stringify(profile));
+  closeGoogleAccount();
+  render();
+  notify(`Вы вошли как ${profile.name}.`);
+}
+
+function loadGoogleIdentityServices() {
+  if (window.google?.accounts?.id) return Promise.resolve();
+  if (!googleIdentityPromise) {
+    googleIdentityPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://accounts.google.com/gsi/client';
+      script.async = true;
+      script.defer = true;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error('google-identity-unavailable'));
+      document.head.append(script);
+    }).catch((error) => {
+      googleIdentityPromise = null;
+      throw error;
+    });
+  }
+  return googleIdentityPromise;
+}
+
+async function prepareGoogleSignIn() {
+  const buttonRoot = $('#google-signin-button');
+  if (!buttonRoot || state.googleProfile) return;
+  if (!navigator.onLine) {
+    buttonRoot.innerHTML = '<p class="account-message">Чтобы войти через Google, подключитесь к интернету.</p>';
+    return;
+  }
+  if (!GOOGLE_CLIENT_ID) {
+    buttonRoot.innerHTML = '<p class="account-message">Вход через Google появится после настройки OAuth для сайта.</p>';
+    return;
+  }
+  buttonRoot.innerHTML = '<p class="account-message">Подключаемся к Google…</p>';
+  try {
+    await loadGoogleIdentityServices();
+    if (!buttonRoot.isConnected) return;
+    buttonRoot.innerHTML = '';
+    if (!googleIdentityInitialized) {
+      window.google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleGoogleCredential, auto_select: false });
+      googleIdentityInitialized = true;
+    }
+    window.google.accounts.id.renderButton(buttonRoot, {
+      theme: 'filled_black', size: 'large', shape: 'pill', text: 'continue_with', logo_alignment: 'left', width: 280, locale: 'ru'
+    });
+  } catch {
+    if (buttonRoot.isConnected) buttonRoot.innerHTML = '<p class="account-message">Не удалось подключиться к Google. Проверьте интернет и попробуйте ещё раз.</p>';
+  }
+}
+
+function openGoogleAccount() {
+  const profile = state.googleProfile;
+  const root = $('#modal-root');
+  root.innerHTML = `<div id="google-account-modal" class="account-modal" role="presentation">
+    <section class="account-sheet" role="dialog" aria-modal="true" aria-labelledby="account-title">
+      <button class="account-close" data-action="close-google-account" aria-label="Закрити">${icon('close')}</button>
+      <div class="account-mark">G</div>
+      <h2 id="account-title">${profile ? 'Аккаунт Google' : 'Войти через Google'}</h2>
+      ${profile ? `<p class="account-message account-message--signed">${safeText(profile.name)}<br><span>${safeText(profile.email)}</span></p><button class="account-signout" data-action="google-signout">Выйти из аккаунта в приложении</button>` : '<div id="google-signin-button" class="google-signin-button"></div>'}
+      <p class="account-footnote">Музыка и аудиофайлы остаются только на этом устройстве.</p>
+    </section>
+  </div>`;
+  root.querySelector('#google-account-modal').addEventListener('click', (event) => {
+    if (event.target.id === 'google-account-modal') closeGoogleAccount();
+  });
+  if (!profile) prepareGoogleSignIn();
 }
 
 function renderScreen() {
@@ -401,6 +502,16 @@ document.addEventListener('click', async (event) => {
       break;
     }
     case 'settings': pushScreen({ type: 'settings' }); break;
+    case 'google-account': openGoogleAccount(); break;
+    case 'close-google-account': closeGoogleAccount(); break;
+    case 'google-signout':
+      window.google?.accounts?.id?.disableAutoSelect();
+      state.googleProfile = null;
+      localStorage.removeItem('muzika-google-profile');
+      closeGoogleAccount();
+      render();
+      notify('Ви вийшли з акаунта в застосунку.');
+      break;
     case 'import': $('#audio-import').click(); break;
     case 'play-track': playTrack(allTracks().find((track) => track.id === id)); break;
     case 'toggle-play': playTrack(currentTrack()); break;

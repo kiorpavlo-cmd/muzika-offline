@@ -169,8 +169,19 @@ button { border: 0; cursor: pointer; }
 .recent-searches button { width: 100%; min-height: 64px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); background: transparent; text-align: left; }
 .recent-searches button span { flex: 1; }.recent-searches .icon { width: 20px; color: #8e8e93; }
 
-.settings-profile { display: flex; align-items: center; gap: 14px; padding: 14px 3px 22px; border-bottom: 1px solid var(--line); }
-.settings-profile > div:last-child { display: flex; flex-direction: column; gap: 5px; }.settings-profile strong { font-size: 19px; }.settings-profile small { color: var(--muted); }
+.settings-profile { width: 100%; display: flex; align-items: center; gap: 14px; padding: 14px 3px 22px; border-bottom: 1px solid var(--line); background: transparent; color: inherit; text-align: left; font: inherit; }
+.settings-profile-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 5px; }.settings-profile strong { font-size: 19px; }.settings-profile small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.settings-profile .chevron { color: var(--muted); transform: rotate(180deg); }
+.account-modal { position: absolute; z-index: 10; inset: 0; display: grid; place-items: end center; padding: 18px 16px calc(18px + var(--safe-bottom)); background: #000b; backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); }
+.account-sheet { position: relative; width: 100%; max-width: 440px; padding: 26px 20px 22px; border: 1px solid #444448; border-radius: 25px; background: #1d1d1f; box-shadow: 0 15px 50px #000b; text-align: center; }
+.account-close { position: absolute; top: 12px; right: 12px; width: 38px; height: 38px; display: grid; place-items: center; border-radius: 50%; background: #303034; color: #eee; }
+.account-close .icon { width: 19px; height: 19px; }
+.account-mark { width: 42px; height: 42px; display: grid; place-items: center; margin: 0 auto 12px; border-radius: 50%; background: #fff; color: #4285f4; font: 700 25px/1 Arial, sans-serif; }
+.account-sheet h2 { margin: 0 0 8px; font-size: 22px; }
+.google-signin-button { min-height: 48px; display: grid; place-items: center; margin: 20px auto 8px; }
+.account-message { margin: 14px 0; color: #c7c7cc; font-size: 14px; line-height: 1.5; }
+.account-message--signed { font-size: 16px; color: #fff; }.account-message--signed span { color: var(--muted); font-size: 14px; }
+.account-footnote { margin: 18px 3px 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.account-signout { width: 100%; min-height: 48px; margin-top: 10px; border-radius: 24px; background: #303034; color: var(--blue); }
 .settings-group { margin: 12px 0 22px; border-radius: 15px; background: #171719; padding: 2px 14px; }
 .settings-row { min-height: 55px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid #2a2a2d; font-size: 15px; }.settings-row:last-child { border: 0; }.settings-row strong { font-size: 14px; }.settings-row button { color: var(--blue); background: transparent; font-size: 14px; }
 .online-label { color: #55d77e; }.offline-label { color: #ffc345; }
