@@ -14,6 +14,8 @@ const HOST = process.env.MUZIKA_HOST || '0.0.0.0';
 const MAX_REQUEST_BYTES = 2048;
 const MAX_AUDIO_BYTES = 120 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 8 * 60 * 1000;
+const ALLOWED_CORS_ORIGINS = new Set((process.env.MUZIKA_ALLOWED_ORIGINS || 'https://kiorpavlo-cmd.github.io')
+  .split(',').map((origin) => origin.trim()).filter(Boolean));
 
 const mimeTypes = {
   '.css': 'text/css; charset=utf-8',
@@ -187,6 +189,18 @@ function sameToken(left, right) {
   return leftBuffer.length === rightBuffer.length && leftBuffer.length > 0 && crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+function applyApiCors(req, res) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  if (!ALLOWED_CORS_ORIGINS.has(origin)) return false;
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Max-Age', '600');
+  res.setHeader('Vary', 'Origin');
+  return true;
+}
+
 function startDownload(videoId, outputDir) {
   return new Promise((resolve, reject) => {
     const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
@@ -239,8 +253,9 @@ function startDownload(videoId, outputDir) {
 }
 
 function requestDownload(req, res, token) {
-  if (!sameToken(cookieValue(req, 'muzika_download'), token)) {
-    return writeJson(res, 401, { error: 'Відкрийте посилання сервера з кодом налаштування на iPhone.' });
+  const bearerToken = /^Bearer\s+([a-f0-9]{64})$/i.exec(req.headers.authorization || '')?.[1] || '';
+  if (!sameToken(cookieValue(req, 'muzika_download'), token) && !sameToken(bearerToken, token)) {
+    return writeJson(res, 401, { error: 'Невірний код доступу до сервера завантаження.' });
   }
 
   readJsonBody(req).then(async ({ videoId }) => {
@@ -279,6 +294,16 @@ function handleHttps(req, res, token) {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   const url = new URL(req.url, `https://${req.headers.host || 'localhost'}`);
+
+  if (url.pathname.startsWith('/api/')) {
+    const corsAllowed = applyApiCors(req, res);
+    if (req.method === 'OPTIONS') {
+      if (!corsAllowed) return writeJson(res, 403, { error: 'Джерело запиту не дозволене.' });
+      res.writeHead(204, { 'Cache-Control': 'no-store' });
+      return res.end();
+    }
+    if (!corsAllowed) return writeJson(res, 403, { error: 'Джерело запиту не дозволене.' });
+  }
 
   if (req.method === 'GET' && url.pathname === '/api/health') {
     return writeJson(res, 200, {

@@ -85,6 +85,25 @@ let youtubeSearchTimer = null;
 let youtubeSearchController = null;
 let youtubeSearchRequestId = 0;
 const activeAudioDownloads = new Set();
+const downloadConnection = (() => {
+  const setup = new URLSearchParams(location.hash.slice(1));
+  const serverValue = setup.get('muzika-download-server') || '';
+  const tokenValue = setup.get('muzika-download-token') || '';
+  if (serverValue && /^[a-f0-9]{64}$/i.test(tokenValue)) {
+    try {
+      const serverUrl = new URL(serverValue);
+      if (serverUrl.protocol === 'https:' && serverUrl.pathname === '/' && !serverUrl.search && !serverUrl.hash) {
+        localStorage.setItem('muzika-download-server', serverUrl.origin);
+        localStorage.setItem('muzika-download-token', tokenValue);
+        history.replaceState(null, '', `${location.pathname}${location.search}`);
+      }
+    } catch { /* Ignore an invalid server setup link. */ }
+  }
+  return {
+    server: localStorage.getItem('muzika-download-server') || '',
+    token: localStorage.getItem('muzika-download-token') || ''
+  };
+})();
 const YOUTUBE_API_KEY = 'AIzaSyC2srpkO7s3ojMb4b5OpQ2YV2Ep0RoNJRM';
 
 const database = {
@@ -593,23 +612,30 @@ async function downloadYouTubeAudio(item, kind, id) {
   notify('⏳ Завантажуємо аудіо. Не закривайте застосунок…');
 
   try {
-    const response = await fetch('/api/download', {
+    const headers = { 'Content-Type': 'application/json' };
+    const endpoint = downloadConnection.server ? `${downloadConnection.server}/api/download` : '/api/download';
+    if (downloadConnection.server) {
+      if (!downloadConnection.token) throw new Error('Не налаштований доступ до сервера завантаження. Відкрийте посилання підключення ще раз.');
+      headers.Authorization = `Bearer ${downloadConnection.token}`;
+    }
+
+    const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ videoId })
     });
 
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       if (response.status === 404 || response.status === 405) {
-        throw new Error('Відкрийте Muzika за адресою локального сервера на Mac.');
+        throw new Error('Сервер завантаження не підключений до цієї версії Muzika. Відкрийте посилання підключення ще раз.');
       }
       throw new Error(payload.error || `Сервер не зміг завантажити аудіо (${response.status}).`);
     }
 
     const audioBlob = await response.blob();
     if (!audioBlob.size || !audioBlob.type.startsWith('audio/')) {
-      throw new Error('Відкрийте локальну HTTPS-версію Muzika на Mac, щоб завантажувати аудіо.');
+      throw new Error('Сервер повернув некоректний аудіофайл. Перевірте посилання підключення.');
     }
 
     const title = item?.snippet?.title || 'Аудіо з YouTube';
@@ -626,7 +652,7 @@ async function downloadYouTubeAudio(item, kind, id) {
   } catch (error) {
     console.error('Не вдалося завантажити аудіо:', error);
     const message = error instanceof TypeError
-      ? 'Не вдалося з’єднатися із сервером Mac. Відкрийте локальну Muzika, поки сервер запущений.'
+      ? 'Не вдалося з’єднатися із сервером завантаження. Перевірте інтернет і відкрийте посилання підключення.'
       : error.message || 'Не вдалося завантажити аудіо.';
     notify(`❌ ${message}`);
   } finally {
