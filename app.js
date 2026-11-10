@@ -84,47 +84,124 @@ const state = {
 let youtubeSearchTimer = null;
 let youtubeSearchController = null;
 let youtubeSearchRequestId = 0;
-localStorage.removeItem('muzika-download-server');
-localStorage.removeItem('muzika-download-token');
-if (location.hash.includes('muzika-download-server=') || location.hash.includes('muzika-download-token=')) {
+
+function readDownloadServerFromHash() {
+  if (!location.hash) return null;
+  const params = new URLSearchParams(location.hash.slice(1));
+  const server = params.get('muzika-download-server');
+  const token = params.get('muzika-download-token');
+  if (!server || !token) return null;
+  return { server, token };
+}
+
+const hashDownloadServer = readDownloadServerFromHash();
+if (hashDownloadServer) {
+  localStorage.setItem('muzika-download-server', hashDownloadServer.server);
+  localStorage.setItem('muzika-download-token', hashDownloadServer.token);
   history.replaceState(null, '', `${location.pathname}${location.search}`);
 }
-const YOUTUBE_API_KEY = 'AIzaSyC2srpkO7s3ojMb4b5OpQ2YV2Ep0RoNJRM';
 
-const database = {
-  open() {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open('muzika-library', 1);
-      request.onupgradeneeded = () => request.result.createObjectStore('tracks', { keyPath: 'id' });
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-  },
-  async all() {
-    const db = await this.open();
-    return new Promise((resolve, reject) => {
-      const request = db.transaction('tracks', 'readonly').objectStore('tracks').getAll();
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-  },
-  async add(track) {
-    const db = await this.open();
-    return new Promise((resolve, reject) => {
-      const request = db.transaction('tracks', 'readwrite').objectStore('tracks').add(track);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  },
-  async remove(id) {
-    const db = await this.open();
-    return new Promise((resolve, reject) => {
-      const request = db.transaction('tracks', 'readwrite').objectStore('tracks').delete(id);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
+function downloadServerConfig() {
+  const server = localStorage.getItem('muzika-download-server') || '';
+  const token = localStorage.getItem('muzika-download-token') || '';
+  if (!server || !token) return null;
+  return { server: server.replace(/\/+$/, ''), token };
+}
+
+async function downloadYouTubeAudio(videoId) {
+  if (!/^[\w-]{11}$/.test(videoId)) {
+    notify('Некоректний ідентифікатор відео.');
+    return;
   }
-};
+
+  notify('Запитуємо MP3 у cobalt…');
+  let response;
+  try {
+    response = await fetch('https://api.cobalt.tools/', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+        downloadMode: 'audio',
+        audioFormat: 'mp3'
+      })
+    });
+  } catch {
+    notify('Не вдалося зв’язатися з сервером cobalt.');
+    return;
+  }
+
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    notify('Сервер cobalt повернув неочікувану відповідь.');
+    return;
+  }
+
+  if (!response.ok || payload.status === 'error') {
+    const code = payload?.error?.code || payload?.text || 'error';
+    notify(`cobalt відмовив: ${code}`);
+    return;
+  }
+
+  const downloadUrl = payload.url || payload.audio;
+  if (!downloadUrl) {
+    notify('cobalt не повернув посилання на файл.');
+    return;
+  }
+
+  let audioResponse;
+  try {
+    audioResponse = await fetch(downloadUrl);
+  } catch {
+    notify('Не вдалося завантажити файл з cobalt.');
+    return;
+  }
+
+  if (!audioResponse.ok) {
+    notify('Сервер не віддав MP3-файл.');
+    return;
+  }
+
+  const blob = await audioResponse.blob();
+  if (!blob.size) {
+    notify('Файл порожній.');
+    return;
+  }
+
+  const fileName = payload.filename || `youtube-${videoId}.mp3`;
+  const baseName = fileName.replace(/\.mp3$/i, '');
+  const pieces = baseName.split(' — ');
+  const artist = pieces.length > 1 ? pieces[0] : 'YouTube';
+  const title = pieces.length > 1 ? pieces.slice(1).join(' — ') : baseName;
+  const file = new File([blob], fileName, { type: 'audio/mpeg' });
+  const track = {
+    id: `local-${crypto.randomUUID()}`,
+    title,
+    artist,
+    album: 'Завантажено з YouTube',
+    art: ['local', 'violet', 'blue', 'rose'][state.localTracks.length % 4],
+    local: true,
+    file
+  };
+
+  try {
+    if (navigator.storage?.persist) {
+      try { await navigator.storage.persist(); } catch { /* ignore */ }
+    }
+    await database.add(track);
+    state.localTracks.push(track);
+    closeSongMenu();
+    render();
+    notify(`Додано в медіатеку: ${title}`);
+  } catch {
+    notify('MP3 отримано, але не вдалося зберегти його в медіатеці.');
+  }
+}
 
 function safeText(value = '') {
   return String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
@@ -736,7 +813,8 @@ function renderSettings() {
   const profile = state.googleProfile;
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><h2>Налаштування</h2><span></span></header>
     <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name || profile.email)}` : 'Войти через Google'}"><span class="profile-button profile-button--large ${profilePictureUrl(profile) ? 'profile-button--photo' : ''}">${profileAvatarContents(profile)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name || profile.email) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
-    <a class="settings-action-card profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>`;
+    <a class="settings-action-card profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>
+    <button class="settings-action-card" data-action="download-server-settings">${icon('download')}<span><strong>Завантаження з Mac</strong><small>${downloadServerConfig() ? `Підключено: ${safeText(downloadServerConfig().server)}` : 'Сервер не підключено'}</small></span>${icon('back', 'chevron')}</button>`;
 }
 
 const GOOGLE_CLIENT_ID = document.querySelector('meta[name="google-client-id"]')?.content.trim() || '';
@@ -833,6 +911,23 @@ function openGoogleAccount() {
     if (event.target.id === 'google-account-modal') closeGoogleAccount();
   });
   if (!profile) prepareGoogleSignIn();
+}
+
+
+function openDownloadServerSettings() {
+  const config = downloadServerConfig();
+  $('#modal-root').innerHTML = `<div id="download-server-backdrop" class="action-modal">
+    <section class="action-sheet" role="dialog" aria-modal="true" aria-label="Сервер завантаження">
+      <h2 style="margin: 6px 4px 12px; font-size: 20px;">Сервер завантаження</h2>
+      <p style="margin: 0 4px 12px; color: #b7b7bd; font-size: 14px; line-height: 1.45;">Вставте посилання, яке показав сервер на Mac (воно містить адресу та токен).</p>
+      <input id="download-server-input" type="url" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://192.168.1.10:3443/#muzika-download-server=…&amp;muzika-download-token=…" value="${config ? safeText(`${config.server}/#muzika-download-server=${encodeURIComponent(config.server)}&muzika-download-token=${encodeURIComponent(config.token)}`) : ''}" style="width: 100%; min-height: 46px; padding: 10px 14px; border: 1px solid #444448; border-radius: 14px; background: #242427; color: #f5f5f7; font-size: 14px;">
+      <button class="song-action-row" data-action="save-download-server">${icon('check')}<span>Підключити сервер</span></button>
+      ${config ? `<button class="song-action-row song-action-row--danger" data-action="clear-download-server">${icon('trash')}<span>Відключити сервер</span></button>` : ''}
+    </section>
+  </div>`;
+  $('#download-server-backdrop').addEventListener('click', (event) => {
+    if (event.target.id === 'download-server-backdrop') closeSongMenu();
+  });
 }
 
 function renderScreen() {
@@ -1639,7 +1734,43 @@ document.addEventListener('click', async (event) => {
     case 'open-item': pushScreen({ type: 'item', kind, id }); break;
     case 'back': navigateBack(); break;
     case 'settings': pushScreen({ type: 'settings' }); break;
-    case 'youtube-download-placeholder': notify('Завантаження поки не підключене.'); break;
+    case 'youtube-download-placeholder': await downloadYouTubeAudio(id); break;
+    case 'download-server-settings': openDownloadServerSettings(); break;
+    case 'save-download-server': {
+      const input = $('#download-server-input');
+      const raw = input?.value?.trim() || '';
+      if (!raw) {
+        notify('Вставте посилання зі сторінки налаштування сервера.');
+        break;
+      }
+      let parsed;
+      try {
+        parsed = new URL(raw.includes('#') ? raw : `${raw}#`);
+      } catch {
+        notify('Не вдалося розпізнати посилання.');
+        break;
+      }
+      const params = new URLSearchParams(parsed.hash.replace(/^#/, ''));
+      const server = params.get('muzika-download-server') || '';
+      const token = params.get('muzika-download-token') || '';
+      if (!server || !token) {
+        notify('У посиланні немає адреси сервера або токена.');
+        break;
+      }
+      localStorage.setItem('muzika-download-server', server.replace(/\/+$/, ''));
+      localStorage.setItem('muzika-download-token', token);
+      closeSongMenu();
+      render();
+      notify('Сервер завантаження підключено.');
+      break;
+    }
+    case 'clear-download-server':
+      localStorage.removeItem('muzika-download-server');
+      localStorage.removeItem('muzika-download-token');
+      closeSongMenu();
+      render();
+      notify('Сервер завантаження відключено.');
+      break;
     case 'google-account': openGoogleAccount(); break;
     case 'close-google-account': closeGoogleAccount(); break;
     case 'google-signout':
