@@ -709,38 +709,64 @@ let refreshRunning = false;
 let pullStart = null;
 let pullDistance = 0;
 const pullRefreshIndicator = $('#pull-refresh');
-const appUpdateScreen = $('#app-update-screen');
 const PULL_REFRESH_THRESHOLD = 86;
-const MIN_UPDATE_SCREEN_DURATION = 950;
-let updateScreenStartedAt = 0;
+const MIN_REFRESH_INDICATOR_MS = 950;
+const REFRESH_ROUTE_KEY = 'muzika-refresh-return';
+let refreshStartedAt = 0;
 
-function showAppUpdateScreen() {
-  if (!appUpdateScreen.classList.contains('app-update-screen--visible')) updateScreenStartedAt = performance.now();
-  appUpdateScreen.hidden = false;
-  appUpdateScreen.setAttribute('aria-hidden', 'false');
-  requestAnimationFrame(() => appUpdateScreen.classList.add('app-update-screen--visible'));
+function showRefreshIndicator(distance = 0) {
+  if (!refreshStartedAt) refreshStartedAt = performance.now();
+  const offset = distance ? Math.min(64, Math.round(distance * 0.62)) : 54;
+  content.classList.remove('content--pulling');
+  content.style.setProperty('--refresh-offset', `${offset}px`);
+  pullRefreshIndicator.style.setProperty('--pull-offset', '0px');
+  pullRefreshIndicator.classList.add('pull-refresh--visible', 'pull-refresh--loading');
+  pullRefreshIndicator.setAttribute('aria-hidden', 'false');
 }
 
-function reloadAfterAppUpdate() {
-  showAppUpdateScreen();
-  const visibleFor = performance.now() - updateScreenStartedAt;
-  setTimeout(() => location.reload(), Math.max(0, MIN_UPDATE_SCREEN_DURATION - visibleFor));
+function rememberScreenBeforeRefresh() {
+  try {
+    sessionStorage.setItem(REFRESH_ROUTE_KEY, JSON.stringify({
+      tab: state.tab,
+      screen: state.screen,
+      screenStack: state.screenStack,
+      scrollTop: content.scrollTop
+    }));
+  } catch {
+    // The refreshed shell can still load if session storage is unavailable.
+  }
 }
 
-function hideAppUpdateScreen() {
-  appUpdateScreen.classList.remove('app-update-screen--visible');
-  appUpdateScreen.setAttribute('aria-hidden', 'true');
-  setTimeout(() => {
-    if (!appUpdateScreen.classList.contains('app-update-screen--visible')) {
-      appUpdateScreen.hidden = true;
-      updateScreenStartedAt = 0;
-    }
-  }, 160);
+function restoreScreenAfterRefresh() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(REFRESH_ROUTE_KEY) || 'null');
+    sessionStorage.removeItem(REFRESH_ROUTE_KEY);
+    if (!saved || !['home', 'new', 'radio', 'library', 'search'].includes(saved.tab)) return null;
+    if (!saved.screen || !['tab', 'settings', 'category', 'item'].includes(saved.screen.type)) return null;
+    if (saved.screen.type === 'tab' && !['home', 'new', 'radio', 'library', 'search'].includes(saved.screen.tab)) return null;
+    state.tab = saved.tab;
+    state.screen = saved.screen;
+    state.screenStack = Array.isArray(saved.screenStack) ? saved.screenStack : [];
+    return Number.isFinite(saved.scrollTop) ? Math.max(0, saved.scrollTop) : 0;
+  } catch {
+    try { sessionStorage.removeItem(REFRESH_ROUTE_KEY); } catch { /* Storage may be disabled. */ }
+    return null;
+  }
+}
+
+function reloadAfterRefresh() {
+  if (!pullRefreshIndicator.classList.contains('pull-refresh--visible')) showRefreshIndicator();
+  pullRefreshIndicator.querySelector('.pull-refresh-label').textContent = 'Оновлено. Перезапускаємо…';
+  rememberScreenBeforeRefresh();
+  const visibleFor = performance.now() - refreshStartedAt;
+  setTimeout(() => location.reload(), Math.max(0, MIN_REFRESH_INDICATOR_MS - visibleFor));
 }
 
 function updatePullIndicator(distance, label) {
-  const offset = Math.min(92, Math.round(distance));
-  pullRefreshIndicator.style.setProperty('--pull-offset', `calc(-82px + ${offset}px)`);
+  const contentOffset = Math.min(64, Math.round(distance * 0.62));
+  const spinnerOffset = Math.min(46, Math.round(distance * 0.54));
+  content.style.setProperty('--refresh-offset', `${contentOffset}px`);
+  pullRefreshIndicator.style.setProperty('--pull-offset', `calc(-46px + ${spinnerOffset}px)`);
   pullRefreshIndicator.classList.toggle('pull-refresh--visible', distance > 6 || refreshRunning);
   pullRefreshIndicator.setAttribute('aria-hidden', 'false');
   pullRefreshIndicator.querySelector('.pull-refresh-label').textContent = label;
@@ -751,6 +777,9 @@ function resetPullIndicator() {
   pullRefreshIndicator.style.removeProperty('--pull-offset');
   pullRefreshIndicator.setAttribute('aria-hidden', 'true');
   pullRefreshIndicator.querySelector('.pull-refresh-label').textContent = 'Потягніть вниз для оновлення';
+  content.classList.remove('content--pulling');
+  content.style.setProperty('--refresh-offset', '0px');
+  refreshStartedAt = 0;
 }
 
 function waitForWorkerActivation(worker, timeoutMs = 45000) {
@@ -795,17 +824,16 @@ function askWorkerToRefreshShell(worker) {
   });
 }
 
-async function forceRefreshOfflineShell() {
+async function forceRefreshOfflineShell(pulledDistance = 0) {
   if (refreshRunning) return;
   if (!navigator.onLine) {
+    resetPullIndicator();
     notify('Немає інтернету. Попередня версія та музика залишилися доступні офлайн.');
     return;
   }
   refreshRunning = true;
-  pullRefreshIndicator.classList.add('pull-refresh--loading', 'pull-refresh--visible');
-  pullRefreshIndicator.setAttribute('aria-hidden', 'false');
+  showRefreshIndicator(pulledDistance);
   pullRefreshIndicator.querySelector('.pull-refresh-label').textContent = 'Завантажуємо застосунок для офлайн…';
-  showAppUpdateScreen();
 
   try {
     if (!('serviceWorker' in navigator)) throw new Error('service-worker-unavailable');
@@ -824,11 +852,9 @@ async function forceRefreshOfflineShell() {
     }
 
     pullRefreshIndicator.querySelector('.pull-refresh-label').textContent = 'Готово. Перезапускаємо…';
-    notify('Офлайн-версію оновлено. Перезапускаємо застосунок…');
-    reloadAfterAppUpdate();
+    reloadAfterRefresh();
   } catch {
     refreshRunning = false;
-    hideAppUpdateScreen();
     resetPullIndicator();
     notify(navigator.onLine
       ? 'Не вдалося оновити офлайн-кеш. Попередня версія та музика збережені.'
@@ -839,6 +865,7 @@ async function forceRefreshOfflineShell() {
 content.addEventListener('touchstart', (event) => {
   if (event.touches.length !== 1 || content.scrollTop > 0 || refreshRunning || $('#modal-root').childElementCount) return;
   if (document.activeElement?.matches('input, textarea')) return;
+  content.classList.add('content--pulling');
   pullStart = { x: event.touches[0].clientX, y: event.touches[0].clientY };
   pullDistance = 0;
 }, { passive: true });
@@ -862,9 +889,10 @@ content.addEventListener('touchmove', (event) => {
 
 content.addEventListener('touchend', () => {
   const shouldRefresh = pullDistance >= PULL_REFRESH_THRESHOLD;
+  const releasedDistance = pullDistance;
   pullStart = null;
   pullDistance = 0;
-  if (shouldRefresh) void forceRefreshOfflineShell();
+  if (shouldRefresh) void forceRefreshOfflineShell(releasedDistance);
   else resetPullIndicator();
 }, { passive: true });
 
@@ -1033,21 +1061,21 @@ async function startServiceWorkerUpdateCheck() {
     const shouldReload = () => {
       if (!hadController || reloadScheduled) return;
       reloadScheduled = true;
-      reloadAfterAppUpdate();
+      reloadAfterRefresh();
     };
     registration.addEventListener('updatefound', () => {
       const worker = registration.installing;
-      if (hadController) showAppUpdateScreen();
+      if (hadController) showRefreshIndicator();
       worker?.addEventListener('statechange', () => {
         if (worker.state === 'installed' && navigator.serviceWorker.controller) shouldReload();
-        else if (worker.state === 'redundant') hideAppUpdateScreen();
+        else if (worker.state === 'redundant') resetPullIndicator();
       });
     });
     if (registration.installing) {
-      if (hadController) showAppUpdateScreen();
+      if (hadController) showRefreshIndicator();
       registration.installing.addEventListener('statechange', (event) => {
         if (event.target.state === 'installed' && navigator.serviceWorker.controller) shouldReload();
-        else if (event.target.state === 'redundant') hideAppUpdateScreen();
+        else if (event.target.state === 'redundant') resetPullIndicator();
       });
     }
     await registration.update().catch(() => {});
@@ -1058,8 +1086,10 @@ async function startServiceWorkerUpdateCheck() {
 }
 
 async function initialize() {
+  const refreshScrollTop = restoreScreenAfterRefresh();
   try { state.localTracks = await database.all(); } catch { state.localTracks = []; }
   render();
+  if (refreshScrollTop !== null) content.scrollTop = refreshScrollTop;
   startServiceWorkerUpdateCheck();
 }
 
