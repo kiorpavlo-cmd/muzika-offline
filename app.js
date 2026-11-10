@@ -892,11 +892,177 @@ function navigateTab(tab) {
   render();
 }
 
+function canStartBackGesture() {
+  return state.screenStack.length > 0 &&
+    content.querySelector('.round-back[data-action="back"]') &&
+    !$('#modal-root').firstElementChild &&
+    !$('#player-root').firstElementChild &&
+    !refreshRunning;
+}
+
+function navigateBack() {
+  const previous = state.screenStack.pop();
+  state.screen = previous ? { ...previous } : { type: 'tab', tab: 'library' };
+  if (state.screen.type === 'tab') state.tab = state.screen.tab;
+  const previousScrollTop = Math.max(0, Number(state.screen.scrollTop) || 0);
+  delete state.screen.scrollTop;
+  render();
+  content.scrollTop = previousScrollTop;
+}
+
 function pushScreen(screen) {
-  state.screenStack.push(state.screen);
+  state.screenStack.push({ ...state.screen, scrollTop: content.scrollTop });
   state.screen = screen;
   render();
 }
+
+let backGesture = null;
+
+function beginBackGesturePreview() {
+  const previous = state.screenStack.at(-1);
+  if (!previous || !canStartBackGesture()) return null;
+
+  const activeScreen = state.screen;
+  let previousMarkup;
+  try {
+    state.screen = previous;
+    previousMarkup = renderScreen();
+  } finally {
+    state.screen = activeScreen;
+  }
+
+  const shellRect = $('.app-shell').getBoundingClientRect();
+  const contentRect = content.getBoundingClientRect();
+  const preview = document.createElement('div');
+  const isRtl = getComputedStyle($('.app-shell')).direction === 'rtl';
+  preview.className = `back-gesture-preview${isRtl ? ' back-gesture-preview--rtl' : ''}`;
+  preview.setAttribute('aria-hidden', 'true');
+  preview.inert = true;
+  preview.innerHTML = previousMarkup;
+  Object.assign(preview.style, {
+    top: `${contentRect.top - shellRect.top}px`,
+    right: isRtl ? '0' : 'auto',
+    bottom: `${shellRect.bottom - contentRect.bottom}px`,
+    left: isRtl ? 'auto' : '0',
+    width: `${contentRect.width}px`,
+    transform: `translate3d(${isRtl ? '' : '-'}28%, 0, 0)`,
+    opacity: '.68'
+  });
+  $('.app-shell').insertBefore(preview, content);
+  preview.scrollTop = Math.max(0, Number(previous.scrollTop) || 0);
+  content.classList.add('content--back-gesture');
+  content.style.transform = 'translate3d(0, 0, 0)';
+  return { preview, width: contentRect.width, isRtl, direction: isRtl ? -1 : 1 };
+}
+
+function updateBackGesture(distance) {
+  if (!backGesture) return;
+  const progress = Math.min(1, distance / backGesture.width);
+  content.style.transform = `translate3d(${backGesture.direction * distance}px, 0, 0)`;
+  backGesture.preview.style.transform = `translate3d(${backGesture.direction * (-28 + progress * 28)}%, 0, 0)`;
+  backGesture.preview.style.opacity = String(.68 + progress * .32);
+}
+
+function clearBackGesture() {
+  if (!backGesture) return;
+  backGesture.preview.remove();
+  content.classList.remove('content--back-gesture', 'content--back-settling');
+  content.style.removeProperty('transform');
+  backGesture = null;
+}
+
+function settleBackGesture(shouldComplete) {
+  if (!backGesture) return;
+  const activeGesture = backGesture;
+  content.classList.remove('content--back-gesture');
+  content.classList.add('content--back-settling');
+  activeGesture.preview.classList.add('back-gesture-preview--settling');
+  if (shouldComplete) {
+    content.style.transform = `translate3d(${activeGesture.direction * activeGesture.width}px, 0, 0)`;
+    activeGesture.preview.style.transform = 'translate3d(0, 0, 0)';
+    activeGesture.preview.style.opacity = '1';
+  } else {
+    content.style.transform = 'translate3d(0, 0, 0)';
+    activeGesture.preview.style.transform = `translate3d(${activeGesture.direction * -28}%, 0, 0)`;
+    activeGesture.preview.style.opacity = '.68';
+  }
+  const settleDelay = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 20 : 250;
+  window.setTimeout(() => {
+    if (backGesture !== activeGesture) return;
+    clearBackGesture();
+    if (shouldComplete) navigateBack();
+  }, settleDelay);
+}
+
+const appShell = $('.app-shell');
+
+appShell.addEventListener('pointerdown', (event) => {
+  if (!canStartBackGesture() || !event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
+  if (event.target.closest?.('#mini-player, #tab-bar, #player-root, #modal-root')) return;
+  const rtl = getComputedStyle(appShell).direction === 'rtl';
+  const shellRect = appShell.getBoundingClientRect();
+  const leadingDistance = rtl ? shellRect.right - event.clientX : event.clientX - shellRect.left;
+  if (leadingDistance < 0 || leadingDistance > 30) return;
+
+  backGesture = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    lastX: event.clientX,
+    lastTime: event.timeStamp,
+    velocity: 0,
+    direction: rtl ? -1 : 1,
+    active: false
+  };
+});
+
+appShell.addEventListener('pointermove', (event) => {
+  if (!backGesture || event.pointerId !== backGesture.pointerId) return;
+  const gesture = backGesture;
+  const signedDistance = (event.clientX - gesture.startX) * gesture.direction;
+  const verticalDistance = event.clientY - gesture.startY;
+  const elapsed = Math.max(1, event.timeStamp - gesture.lastTime);
+  gesture.velocity = ((event.clientX - gesture.lastX) * gesture.direction) / elapsed;
+  gesture.lastX = event.clientX;
+  gesture.lastTime = event.timeStamp;
+
+  if (!gesture.active) {
+    if (Math.abs(verticalDistance) > 12 && Math.abs(verticalDistance) > signedDistance) {
+      backGesture = null;
+      return;
+    }
+    if (signedDistance < 8 || signedDistance < Math.abs(verticalDistance) * 1.15) return;
+    const preview = beginBackGesturePreview();
+    if (!preview) {
+      backGesture = null;
+      return;
+    }
+    Object.assign(gesture, preview, { active: true });
+    try { appShell.setPointerCapture(event.pointerId); } catch { /* Pointer capture can be unavailable in older WebKit. */ }
+  }
+
+  if (event.cancelable) event.preventDefault();
+  updateBackGesture(Math.max(0, signedDistance));
+}, { passive: false });
+
+function finishBackGesture(event) {
+  if (!backGesture || event.pointerId !== backGesture.pointerId) return;
+  if (!backGesture.active) {
+    backGesture = null;
+    return;
+  }
+  const gesture = backGesture;
+  const distance = (event.clientX - gesture.startX) * gesture.direction;
+  const shouldComplete = distance > Math.min(120, gesture.width * .32) || (distance > 48 && gesture.velocity > .48);
+  settleBackGesture(shouldComplete);
+}
+
+appShell.addEventListener('pointerup', finishBackGesture);
+appShell.addEventListener('pointercancel', (event) => {
+  if (!backGesture || event.pointerId !== backGesture.pointerId) return;
+  if (backGesture.active) settleBackGesture(false);
+  else backGesture = null;
+});
 
 async function playTrack(track) {
   if (!track) return;
@@ -1163,12 +1329,7 @@ document.addEventListener('click', async (event) => {
   switch (action) {
     case 'category': pushScreen({ type: 'category', category }); break;
     case 'open-item': pushScreen({ type: 'item', kind, id }); break;
-    case 'back': {
-      state.screen = state.screenStack.pop() || { type: 'tab', tab: 'library' };
-      if (state.screen.type === 'tab') state.tab = state.screen.tab;
-      render();
-      break;
-    }
+    case 'back': navigateBack(); break;
     case 'settings': pushScreen({ type: 'settings' }); break;
     case 'google-account': openGoogleAccount(); break;
     case 'close-google-account': closeGoogleAccount(); break;
