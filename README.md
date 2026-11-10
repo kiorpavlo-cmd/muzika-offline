@@ -35,6 +35,6 @@ python3 -m http.server 8000
 
 ## Google-вхід
 
-Вхід через Google і імпорт з Диска налаштовуються окремо в Google Cloud. Для Диска застосунок використовує Google Picker зі scope `drive.file`: користувач сам вибирає аудіофайли, а застосунок зберігає їх у локальній офлайн-медіатеці. Інші файли Диска не відкриваються. Client ID, обмежений API key і номер Cloud project підставляються у відповідні `meta` теги в `index.html`. Не додавайте Client Secret до статичного сайту.
+Google-вхід використовується лише для профілю. Аудіофайли додаються з пристрою та залишаються у локальній офлайн-медіатеці; застосунок не запитує доступ до Google Диска.
 
-YouTube Music не можна використовувати як джерело офлайн-аудіо в цьому застосунку. Офіційний YouTube Player працює онлайн, а правила YouTube API забороняють завантаження або кешування аудіовізуального вмісту для офлайн-відтворення та відтворення у фоні. Див. [YouTube API Developer Policies](https://developers.google.com/youtube/terms/developer-policies) і [Google Drive OAuth scopes](https://developers.google.com/workspace/drive/api/guides/api-specific-auth).
+YouTube Music не можна використовувати як джерело офлайн-аудіо в цьому застосунку. Офіційний YouTube Player працює онлайн, а правила YouTube API забороняють завантаження або кешування аудіовізуального вмісту для офлайн-відтворення та відтворення у фоні. Див. [YouTube API Developer Policies](https://developers.google.com/youtube/terms/developer-policies).

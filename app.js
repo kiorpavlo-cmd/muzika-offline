@@ -408,19 +408,12 @@ function renderSettings() {
   const profile = state.googleProfile;
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><h2>Налаштування</h2><span></span></header>
     <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name || profile.email)}` : 'Войти через Google'}"><span class="profile-button profile-button--large ${profilePictureUrl(profile) ? 'profile-button--photo' : ''}">${profileAvatarContents(profile)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name || profile.email) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
-    <button class="import-panel" data-action="drive-import">${icon('download')}<span><strong>Импорт из Google Диска</strong><small>Выбранные файлы сохраняются только на этом устройстве</small></span>${icon('back', 'chevron')}</button>
-    <a class="import-panel profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>
-    <p class="settings-note">Оновлення інтерфейсу завантажуються автоматично під час запуску, коли є інтернет. Збережена музика та сам застосунок доступні офлайн.</p>`;
+    <a class="settings-action-card profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>`;
 }
 
 const GOOGLE_CLIENT_ID = document.querySelector('meta[name="google-client-id"]')?.content.trim() || '';
-const GOOGLE_DRIVE_API_KEY = document.querySelector('meta[name="google-drive-api-key"]')?.content.trim() || '';
-const GOOGLE_CLOUD_PROJECT_NUMBER = document.querySelector('meta[name="google-cloud-project-number"]')?.content.trim() || '';
-const GOOGLE_DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 let googleIdentityPromise;
 let googleIdentityInitialized = false;
-let googleApiLoaderPromise;
-let googlePickerPromise;
 
 function closeGoogleAccount() {
   $('#modal-root').innerHTML = '';
@@ -466,107 +459,6 @@ function loadGoogleIdentityServices() {
     });
   }
   return googleIdentityPromise;
-}
-
-function loadGoogleApiLoader() {
-  if (window.gapi?.load) return Promise.resolve();
-  if (!googleApiLoaderPromise) {
-    googleApiLoaderPromise = new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = 'https://apis.google.com/js/api.js';
-      script.async = true;
-      script.defer = true;
-      script.onload = resolve;
-      script.onerror = () => reject(new Error('google-api-loader-unavailable'));
-      document.head.append(script);
-    }).catch((error) => {
-      googleApiLoaderPromise = null;
-      throw error;
-    });
-  }
-  return googleApiLoaderPromise;
-}
-
-async function loadGooglePicker() {
-  if (window.google?.picker?.PickerBuilder) return;
-  if (!googlePickerPromise) {
-    googlePickerPromise = (async () => {
-      await loadGoogleApiLoader();
-      await new Promise((resolve, reject) => {
-        window.gapi.load('picker', {
-          callback: resolve,
-          onerror: () => reject(new Error('google-picker-unavailable')),
-          timeout: 10000,
-          ontimeout: () => reject(new Error('google-picker-timeout'))
-        });
-      });
-    })().catch((error) => {
-      googlePickerPromise = null;
-      throw error;
-    });
-  }
-  await googlePickerPromise;
-}
-
-function importFromGoogleDrive() {
-  if (!navigator.onLine) return notify('Для импорта из Google Диска подключитесь к интернету.');
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_DRIVE_API_KEY || !GOOGLE_CLOUD_PROJECT_NUMBER) {
-    return notify('Импорт из Google Диска появится после настройки доступа Google.');
-  }
-
-  loadGoogleIdentityServices().then(() => {
-    const tokenClient = window.google.accounts.oauth2.initTokenClient({
-      client_id: GOOGLE_CLIENT_ID,
-      scope: GOOGLE_DRIVE_FILE_SCOPE,
-      callback: async (response) => {
-        if (response.error || !response.access_token) return notify('Не удалось получить доступ к выбранным файлам Google Диска.');
-        try {
-          await openGoogleDrivePicker(response.access_token);
-        } catch {
-          notify('Не удалось открыть Google Диск. Проверьте интернет и настройки доступа.');
-        }
-      }
-    });
-    tokenClient.requestAccessToken({ prompt: 'consent' });
-  }).catch(() => notify('Не удалось подключиться к Google. Проверьте интернет и попробуйте ещё раз.'));
-}
-
-async function openGoogleDrivePicker(accessToken) {
-  await loadGooglePicker();
-  const picker = new window.google.picker.PickerBuilder()
-    .setAppId(GOOGLE_CLOUD_PROJECT_NUMBER)
-    .setDeveloperKey(GOOGLE_DRIVE_API_KEY)
-    .setOAuthToken(accessToken)
-    .setLocale('ru')
-    .addView(new window.google.picker.DocsView(window.google.picker.ViewId.DOCS)
-      .setMimeTypes('audio/mpeg,audio/mp4,audio/aac,audio/wav,audio/x-wav,audio/flac,audio/ogg,audio/webm,audio/opus'))
-    .enableFeature(window.google.picker.Feature.MULTISELECT_ENABLED)
-    .setCallback((data) => handleGoogleDrivePickerResult(data, accessToken))
-    .build();
-  picker.setVisible(true);
-}
-
-async function handleGoogleDrivePickerResult(data, accessToken) {
-  if (data[window.google.picker.Response.ACTION] !== window.google.picker.Action.PICKED) return;
-  const documents = data[window.google.picker.Response.DOCUMENTS] || [];
-  try {
-    const files = [];
-    for (const document of documents) {
-      const fileId = document[window.google.picker.Document.ID];
-      const name = document[window.google.picker.Document.NAME] || 'Аудиофайл';
-      const mimeType = document[window.google.picker.Document.MIME_TYPE] || '';
-      if (!fileId || !mimeType.startsWith('audio/')) throw new Error('not-audio-file');
-      const response = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, {
-        headers: { Authorization: `Bearer ${accessToken}` }
-      });
-      if (!response.ok) throw new Error('drive-download-failed');
-      const blob = await response.blob();
-      files.push(new File([blob], name, { type: mimeType || blob.type }));
-    }
-    await storeAudioFiles(files);
-  } catch (error) {
-    notify(error.message === 'not-audio-file' ? 'Выберите аудиофайлы из Google Диска.' : 'Не удалось загрузить выбранные аудиофайлы.');
-  }
 }
 
 async function prepareGoogleSignIn() {
@@ -1346,7 +1238,6 @@ document.addEventListener('click', async (event) => {
       render();
       notify('Ви вийшли з акаунта в застосунку.');
       break;
-    case 'drive-import': importFromGoogleDrive(); break;
     case 'play-track': playTrack(allTracks().find((track) => track.id === id)); break;
     case 'toggle-play': playTrack(currentTrack()); break;
     case 'next-track': {
