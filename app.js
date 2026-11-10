@@ -52,6 +52,7 @@ const state = {
   screen: { type: 'tab', tab: 'home' },
   screenStack: [],
   searchText: '',
+  searchCategory: 'top',
   recentSearches: JSON.parse(localStorage.getItem('muzika-searches') || '[]'),
   recentTrackIds: JSON.parse(localStorage.getItem('muzika-recent-tracks') || '[]'),
   favorites: JSON.parse(localStorage.getItem('muzika-favorites') || '[]'),
@@ -338,19 +339,30 @@ function renderLibrary() {
 }
 
 function renderSearch() {
-  return `<header class="search-header"><label class="search-box">${icon('search')}<input id="search-input" type="search" placeholder="Виконавці, пісні, альбоми" value="${safeText(state.searchText)}" autocomplete="off">${icon('mic')}</label><button class="search-close" data-action="close-search" aria-label="Закрити">${icon('close')}</button></header>
+  return `<header class="search-header"><div class="search-box">${icon('search')}<input id="search-input" type="search" placeholder="Виконавці, пісні, альбоми" value="${safeText(state.searchText)}" autocomplete="off"><button id="search-clear" class="search-clear" data-action="clear-search-input" aria-label="Очистити запит" ${state.searchText.trim() ? '' : 'hidden'}>${icon('close')}</button></div><button class="search-close" data-action="close-search" aria-label="Закрити пошук">${icon('close')}</button></header>
     <div id="search-body">${renderSearchBody()}</div>`;
 }
 
 function renderSearchBody() {
   const query = state.searchText.trim();
-  const matches = query ? allTracks().filter((track) => `${track.title} ${track.artist} ${track.album}`.toLowerCase().includes(query.toLowerCase())) : [];
-  const youtubeMusicUrl = `https://music.youtube.com/search?q=${encodeURIComponent(query)}`;
-  return query
-    ? `<section class="global-search-section"><div class="search-results-label">Глобальний пошук</div><a class="global-search-link" href="${safeText(youtubeMusicUrl)}" target="_blank" rel="noopener noreferrer">${icon('search')}<span><strong>YouTube Music</strong><small>Відкрити глобальні результати онлайн</small></span>${icon('back', 'chevron')}</a></section>
-      <div class="search-results-label">Медіатека на пристрої</div>${matches.length ? `<div class="song-list">${prioritizePinned(matches).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : '<div class="empty-state">У вашій офлайн-медіатеці збігів немає.</div>'}`
-    : `<div class="section-heading"><h2>Недавні пошуки</h2><button class="text-action text-action--red" data-action="clear-search">Очистити</button></div>
+  if (!query) return `<div class="section-heading"><h2>Недавні пошуки</h2><button class="text-action text-action--red" data-action="clear-search">Очистити</button></div>
       <div class="recent-searches">${state.recentSearches.map((term) => `<button data-action="recent-search" data-term="${safeText(term)}">${icon('search')}<span>${safeText(term)}</span>${icon('more')}</button>`).join('') || '<div class="empty-state">Ваші пошуки з’являться тут.</div>'}</div>`;
+
+  const normalizedQuery = query.toLocaleLowerCase();
+  const tracks = prioritizePinned(allTracks().filter((track) => `${track.title} ${track.artist} ${track.album}`.toLocaleLowerCase().includes(normalizedQuery)));
+  const artists = libraryArtists().filter((artist) => artist.title.toLocaleLowerCase().includes(normalizedQuery));
+  const albums = libraryAlbums().filter((album) => `${album.title} ${album.artist}`.toLocaleLowerCase().includes(normalizedQuery));
+  const youtubeMusicUrl = `https://music.youtube.com/search?q=${encodeURIComponent(query)}`;
+  const tabs = [['top', 'Найкращі результати'], ['artists', 'Виконавці'], ['albums', 'Альбоми']];
+  const tabMarkup = `<nav class="search-tabs" role="tablist" aria-label="Категорії пошуку">${tabs.map(([key, title]) => `<button class="search-tab ${state.searchCategory === key ? 'search-tab--active' : ''}" role="tab" aria-selected="${state.searchCategory === key}" data-action="search-category" data-category="${key}">${title}</button>`).join('')}</nav>`;
+  const artistRows = artists.map((artist) => `<button class="search-result-entity" data-action="open-item" data-kind="artist" data-id="${safeText(artist.id)}">${artMarkup(artist.art, artist.title, 'search-result-art search-result-art--round')}<span class="search-result-copy"><strong>${safeText(artist.title)}</strong><small>Виконавець</small></span>${icon('back', 'chevron')}</button>`).join('');
+  const trackRows = tracks.map((track) => `<div class="song-row search-song-row">${artMarkup(track.art, track.album, 'song-art')}<button class="song-main" data-action="play-track" data-id="${safeText(track.id)}"><span class="song-title">${safeText(track.title)}${track.explicit ? '<span class="explicit-mark">E</span>' : ''}</span><span class="song-artist">Пісня · ${safeText(track.artist)}</span></button><button class="icon-button song-more" data-action="song-menu" data-id="${safeText(track.id)}" aria-label="Додаткові дії">${icon('more')}</button></div>`).join('');
+  const albumRows = albums.map((album) => `<button class="search-result-entity" data-action="open-item" data-kind="album" data-id="${safeText(album.id)}">${artMarkup(album.art, album.title, 'search-result-art')}<span class="search-result-copy"><strong>${safeText(album.title)}</strong><small>Альбом · ${safeText(album.artist)}</small></span>${icon('back', 'chevron')}</button>`).join('');
+  const globalResult = `<a class="global-search-result" href="${safeText(youtubeMusicUrl)}" target="_blank" rel="noopener noreferrer"><span class="global-search-icon">${icon('search')}</span><span class="search-result-copy"><strong>${safeText(query)}</strong><small>Глобальні результати · YouTube Music</small></span>${icon('back', 'chevron')}</a>`;
+  const localResults = state.searchCategory === 'artists' ? artistRows || '<div class="empty-state">Виконавців у медіатеці пристрою немає.</div>'
+    : state.searchCategory === 'albums' ? albumRows || '<div class="empty-state">Альбомів у медіатеці пристрою немає.</div>'
+      : `${artistRows}${trackRows}${albumRows}${artistRows || trackRows || albumRows ? '' : '<div class="empty-state">Локальних збігів немає. Глобальний пошук доступний за першим рядком.</div>'}`;
+  return `${tabMarkup}<div class="search-result-list">${globalResult}${localResults}</div>`;
 }
 
 function renderItemScreen() {
@@ -1269,8 +1281,10 @@ document.addEventListener('click', async (event) => {
       break;
     }
     case 'clear-search': state.recentSearches = []; localStorage.removeItem('muzika-searches'); render(); break;
-    case 'close-search': state.searchText = ''; state.tab = 'home'; state.screenStack = []; state.screen = { type: 'tab', tab: 'home' }; render(); break;
-    case 'recent-search': state.searchText = term; render(); break;
+    case 'clear-search-input': state.searchText = ''; state.searchCategory = 'top'; render(); $('#search-input')?.focus({ preventScroll: true }); break;
+    case 'close-search': state.searchText = ''; state.searchCategory = 'top'; state.tab = 'home'; state.screenStack = []; state.screen = { type: 'tab', tab: 'home' }; render(); break;
+    case 'recent-search': state.searchText = term; state.searchCategory = 'top'; render(); break;
+    case 'search-category': state.searchCategory = button.dataset.category; $('#search-body').innerHTML = renderSearchBody(); break;
     case 'song-menu': {
       const track = allTracks().find((item) => item.id === id);
       if (track) openSongMenu(track);
@@ -1339,6 +1353,8 @@ document.addEventListener('click', async (event) => {
 content.addEventListener('input', (event) => {
   if (event.target.id !== 'search-input') return;
   state.searchText = event.target.value;
+  state.searchCategory = 'top';
+  $('#search-clear').hidden = !state.searchText.trim();
   $('#search-body').innerHTML = renderSearchBody();
 });
 
