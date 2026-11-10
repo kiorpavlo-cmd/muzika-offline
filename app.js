@@ -25,7 +25,6 @@ const icons = {
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   close: '<path d="m6 6 12 12M18 6 6 18"/>',
-  mic: '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-4 0h8"/>',
   star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z" fill="currentColor" stroke="none"/>',
   pin: '<path d="M16 3 8 11l-3-1-2 2 6 3 3 6 2-2-1-3 8-8-5-5Z"/><path d="m3 21 7-7"/>',
   playlistAdd: '<path d="M4 6h11M4 12h11M4 18h7"/><path d="M19 3v8m-4-4h8"/>',
