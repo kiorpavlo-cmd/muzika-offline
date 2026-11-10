@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="uk">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#000000">
+    <meta name="description" content="Офлайн музична медіатека для вашої музики.">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <title>Музика</title>
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="icon" href="./assets/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="./assets/icon.png">
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <div class="status-bar" aria-hidden="true">
+        <span class="status-time">14:03</span>
+        <span class="status-right"><span class="signal"><i></i><i></i><i></i><i></i></span><span>5G</span><span class="battery"><b></b><em>86</em></span></span>
+      </div>
+
+      <main id="content" class="content" aria-live="polite"></main>
+
+      <section id="mini-player" class="mini-player" aria-label="Мініплеєр"></section>
+      <nav id="tab-bar" class="tab-bar" aria-label="Основна навігація"></nav>
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+      <input id="audio-import" type="file" accept="audio/*" multiple hidden>
+      <audio id="audio-element" preload="metadata"></audio>
+    </div>
+    <script src="./app.js" defer></script>
+  </body>
+</html>
