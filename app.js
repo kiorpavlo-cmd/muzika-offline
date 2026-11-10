@@ -1626,15 +1626,57 @@ document.addEventListener('click', async (event) => {
       break;
     }
     case 'youtube-result-menu': openYouTubeResultMenu(findYouTubeResult(kind, id), kind, id); break;
-    case 'open-youtube-download': {
-      const item = findYouTubeResult(kind, id);
-      const videoId = kind === 'video' ? item?.id?.videoId || id : '';
-      if (!videoId) break;
-      window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, '_blank', 'noopener,noreferrer');
-      closeSongMenu();
-      notify('Відкриваємо YouTube. Якщо для відео доступне «Завантажити», воно збережеться в YouTube, а не в медіатеці цього застосунку.');
-      break;
-    }
+case 'open-youtube-download': {
+  const item = findYouTubeResult(kind, id);
+  const videoId = kind === 'video' ? item?.id?.videoId || id : '';
+  if (!videoId) break;
+
+  closeSongMenu();
+  notify('⏳ Завантаження та конвертація в MP3 почалися...');
+
+  const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  // Обращаемся к локальному серверу, запущенному на этом же устройстве
+  fetch('http://localhost:3000/download', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ url: youtubeUrl }),
+  })
+    .then(async (response) => {
+      if (!response.ok) throw new Error('Помилка завантаження');
+      
+      const blob = await response.blob();
+      const contentDisposition = response.headers.get('Content-Disposition');
+      let filename = 'audio.mp3';
+      
+      if (contentDisposition && contentDisposition.includes('filename=')) {
+        const matches = contentDisposition.match(/filename\*?="?([^"]+)"?/);
+        if (matches && matches[1]) {
+          filename = decodeURIComponent(matches[1].replace(/^UTF-8''/, ''));
+        }
+      }
+
+      // Создаем виртуальную ссылку для скачивания в браузере устройства
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+
+      notify('✅ Файл успішно збережено на пристрій!');
+    })
+    .catch((error) => {
+      console.error(error);
+      notify('❌ Помилка: перевірте, чи запущено локальний сервер та yt-dlp.');
+    });
+
+  break;
+}
     case 'save-youtube-result': saveYouTubeResult(findYouTubeResult(kind, id), kind, id); break;
     case 'toggle-youtube-favorite': toggleYouTubeFavorite(findYouTubeResult(kind, id), kind, id); break;
     case 'share-youtube-result': await shareYouTubeResult(findYouTubeResult(kind, id), kind, id); break;
