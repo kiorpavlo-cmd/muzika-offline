@@ -1,4 +1,4 @@
-const CACHE_NAME = 'muzika-shell-v9';
+const CACHE_NAME = 'muzika-shell-v12';
 const STAGING_PREFIX = 'muzika-refresh-staging-';
 const APP_FILES = [
   './',
@@ -7,7 +7,6 @@ const APP_FILES = [
   './app.js',
   './manifest.webmanifest',
   './Muzika.mobileconfig',
-  './assets/icon.svg',
   './assets/icon.png'
 ];
 

@@ -1,6 +1,6 @@
 {
-  "name": "Музика — офлайн медіатека",
-  "short_name": "Музика",
+  "name": "Music",
+  "short_name": "Music",
   "description": "Ваша музика завжди під рукою, навіть без інтернету.",
   "lang": "uk",
   "start_url": "./",
@@ -10,7 +10,6 @@
   "theme_color": "#000000",
   "orientation": "portrait-primary",
   "icons": [
-    { "src": "./assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" },
     { "src": "./assets/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
   ]
 }

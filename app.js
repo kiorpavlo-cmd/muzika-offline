@@ -84,6 +84,7 @@ const state = {
 let youtubeSearchTimer = null;
 let youtubeSearchController = null;
 let youtubeSearchRequestId = 0;
+const activeAudioDownloads = new Set();
 const YOUTUBE_API_KEY = 'AIzaSyC2srpkO7s3ojMb4b5OpQ2YV2Ep0RoNJRM';
 
 const database = {
@@ -581,6 +582,58 @@ async function shareYouTubeResult(item, kind, id) {
   }
 }
 
+async function downloadYouTubeAudio(item, kind, id) {
+  const videoId = kind === 'video' ? item?.id?.videoId || id : '';
+  if (!videoId) return notify('Не вдалося визначити відео для завантаження.');
+
+  const downloadKey = `${kind}:${videoId}`;
+  if (activeAudioDownloads.has(downloadKey)) return notify('Це аудіо вже завантажується.');
+  activeAudioDownloads.add(downloadKey);
+  closeSongMenu();
+  notify('⏳ Завантажуємо аудіо. Не закривайте застосунок…');
+
+  try {
+    const response = await fetch('/api/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ videoId })
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 404 || response.status === 405) {
+        throw new Error('Відкрийте Muzika за адресою локального сервера на Mac.');
+      }
+      throw new Error(payload.error || `Сервер не зміг завантажити аудіо (${response.status}).`);
+    }
+
+    const audioBlob = await response.blob();
+    if (!audioBlob.size || !audioBlob.type.startsWith('audio/')) {
+      throw new Error('Відкрийте локальну HTTPS-версію Muzika на Mac, щоб завантажувати аудіо.');
+    }
+
+    const title = item?.snippet?.title || 'Аудіо з YouTube';
+    const artist = item?.snippet?.channelTitle || 'YouTube';
+    const safeFilename = `${artist} — ${title}.mp3`
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const audioFile = new File([audioBlob], safeFilename, { type: 'audio/mpeg' });
+    const saved = await storeAudioFiles([audioFile], { notifyUser: false });
+    if (!saved) throw new Error('Не вдалося зберегти аудіо. Перевірте вільне місце на пристрої.');
+
+    notify(`✅ «${title}» збережено на пристрої. Тепер його можна слухати офлайн.`);
+  } catch (error) {
+    console.error('Не вдалося завантажити аудіо:', error);
+    const message = error instanceof TypeError
+      ? 'Не вдалося з’єднатися із сервером Mac. Відкрийте локальну Muzika, поки сервер запущений.'
+      : error.message || 'Не вдалося завантажити аудіо.';
+    notify(`❌ ${message}`);
+  } finally {
+    activeAudioDownloads.delete(downloadKey);
+  }
+}
+
 function openYouTubePlayer(item) {
   const id = item?.id?.videoId || item?.id?.playlistId;
   if (!id || !/^[\w-]{8,80}$/.test(id)) return;
@@ -612,7 +665,7 @@ function openYouTubeResultMenu(item, kind, id) {
   const channelId = item.snippet?.channelId || (kind === 'channel' ? id : '');
   const channelTitle = safeText(item.snippet?.channelTitle || item.snippet?.title || '');
   const quickActions = `<div class="youtube-menu-quick"><button class="youtube-menu-quick-action" data-action="save-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('plusCircle')}<span>${inLibrary ? 'У медіатеці' : 'Додати'}</span></button><button class="youtube-menu-quick-action" data-action="toggle-youtube-favorite" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('star', isFavorite ? 'youtube-favorite-active' : '')}<span>${isFavorite ? 'В улюблених' : 'Додати до улюблених'}</span></button><button class="youtube-menu-quick-action" data-action="share-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('share')}<span>Поширити</span></button></div>`;
-  const downloadAction = kind === 'video' ? `<div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="open-youtube-download" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('download')}<span>Завантажити</span></button></div>` : '';
+  const downloadAction = kind === 'video' ? `<div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="download-youtube-audio" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('download')}<span>Завантажити аудіо на пристрій<small>Збережеться в медіатеці для прослуховування офлайн</small></span></button></div>` : '';
   const playlistActions = `<div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="open-youtube-playlist-menu" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('playlistAdd')}<span>Додати до підбірки</span></button>${kind === 'video' ? `<button class="song-action-row youtube-menu-row" data-action="queue-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('queue')}<span>Відтворити далі</span></button><button class="song-action-row youtube-menu-row" data-action="youtube-create-station" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('station')}<span>Створити станцію</span></button>` : `<button class="song-action-row youtube-menu-row" data-action="open-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('play')}<span>Відтворити</span></button>`}</div>`;
   const creatorActions = `<div class="youtube-menu-group">${kind === 'video' ? `<button class="song-action-row youtube-menu-row" data-action="youtube-search-albums" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('albumFile')}<span>Перейти до альбому</span></button>` : ''}<button class="song-action-row youtube-menu-row" data-action="youtube-open-channel" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('artist')}<span>Перейти до виконавця</span></button><button class="song-action-row youtube-menu-row" data-action="youtube-about-creator" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('info')}<span>Переглянути дані про автора</span></button></div>`;
   const feedback = `<div class="youtube-menu-group youtube-menu-group--last"><button class="song-action-row youtube-menu-row" data-action="youtube-suggest-less" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('dislike')}<span>Пропонувати менше</span></button></div>`;
@@ -1321,10 +1374,16 @@ async function playTrack(track) {
   }
 }
 
-async function storeAudioFiles(files) {
+async function storeAudioFiles(files, { notifyUser = true } = {}) {
   const audioFiles = [...files].filter((file) => file.type.startsWith('audio/'));
-  if (!audioFiles.length) return notify('Оберіть аудіофайл.');
+  if (!audioFiles.length) {
+    if (notifyUser) notify('Оберіть аудіофайл.');
+    return false;
+  }
   try {
+    if (navigator.storage?.persist) {
+      try { await navigator.storage.persist(); } catch { /* Keep saving when persistent storage is unavailable. */ }
+    }
     for (const file of audioFiles) {
       const name = file.name.replace(/\.[^.]+$/, '');
       const pieces = name.split(' — ');
@@ -1335,10 +1394,12 @@ async function storeAudioFiles(files) {
       await database.add(track);
       state.localTracks.push(track);
     }
-    notify(`Додано пісень: ${audioFiles.length}`);
+    if (notifyUser) notify(`Додано пісень: ${audioFiles.length}`);
     render();
+    return true;
   } catch {
-    notify('Не вдалося зберегти файли. Перевірте вільне місце на пристрої.');
+    if (notifyUser) notify('Не вдалося зберегти файли. Перевірте вільне місце на пристрої.');
+    return false;
   }
 }
 
@@ -1626,57 +1687,7 @@ document.addEventListener('click', async (event) => {
       break;
     }
     case 'youtube-result-menu': openYouTubeResultMenu(findYouTubeResult(kind, id), kind, id); break;
-case 'open-youtube-download': {
-  const item = findYouTubeResult(kind, id);
-  const videoId = kind === 'video' ? item?.id?.videoId || id : '';
-  if (!videoId) break;
-
-  closeSongMenu();
-  notify('⏳ Завантаження та конвертація в MP3 почалися...');
-
-  const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-
-  // Обращаемся к локальному серверу, запущенному на этом же устройстве
-  fetch('http://localhost:3000/download', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ url: youtubeUrl }),
-  })
-    .then(async (response) => {
-      if (!response.ok) throw new Error('Помилка завантаження');
-      
-      const blob = await response.blob();
-      const contentDisposition = response.headers.get('Content-Disposition');
-      let filename = 'audio.mp3';
-      
-      if (contentDisposition && contentDisposition.includes('filename=')) {
-        const matches = contentDisposition.match(/filename\*?="?([^"]+)"?/);
-        if (matches && matches[1]) {
-          filename = decodeURIComponent(matches[1].replace(/^UTF-8''/, ''));
-        }
-      }
-
-      // Создаем виртуальную ссылку для скачивания в браузере устройства
-      const downloadUrl = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = downloadUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(downloadUrl);
-
-      notify('✅ Файл успішно збережено на пристрій!');
-    })
-    .catch((error) => {
-      console.error(error);
-      notify('❌ Помилка: перевірте, чи запущено локальний сервер та yt-dlp.');
-    });
-
-  break;
-}
+    case 'download-youtube-audio': await downloadYouTubeAudio(findYouTubeResult(kind, id), kind, id); break;
     case 'save-youtube-result': saveYouTubeResult(findYouTubeResult(kind, id), kind, id); break;
     case 'toggle-youtube-favorite': toggleYouTubeFavorite(findYouTubeResult(kind, id), kind, id); break;
     case 'share-youtube-result': await shareYouTubeResult(findYouTubeResult(kind, id), kind, id); break;
