@@ -314,7 +314,7 @@ function renderHome() {
     </button>
   </div>` : '';
   const recentSection = recentlyPlayed.length ? `${sectionHeading('Недавно прослухані', 'Усі', 'recent')}<div class="song-list">${recentlyPlayed.slice(0, 5).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : '';
-  const librarySection = recentlyAdded.length ? `${sectionHeading('Недавно додані')}<div class="song-list">${recentlyAdded.map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : `<div class="empty-state empty-state--home">${icon('music')}<strong>Ваша медіатека порожня</strong><span>Додайте аудіофайли з пристрою або Google Диска — вони збережуться для офлайн-прослуховування.</span><button class="empty-state-action" data-action="import">Додати аудіофайли</button></div>`;
+  const librarySection = recentlyAdded.length ? `${sectionHeading('Недавно додані')}<div class="song-list">${recentlyAdded.map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : `<div class="empty-state empty-state--home">${icon('music')}<strong>Ваша медіатека порожня</strong></div>`;
   return `<header class="page-header page-header--home"><h1>Домівка</h1>${profileButtonMarkup()}</header>
     ${favoritesSection}${recentSection}${librarySection}`;
 }
@@ -334,8 +334,7 @@ function renderLibrary() {
   const added = [...allTracks()].reverse();
   return `<header class="page-header page-header--library"><h1>Медіатека</h1>${profileButtonMarkup()}</header>
     <div class="category-list">${categories}</div>
-    ${added.length ? `${sectionHeading('Недавно додані', 'Усі', 'all-albums')}<div class="song-list">${added.slice(0, 8).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : ''}
-    <div class="library-footnote">${icon('download')}<span>Додайте свої аудіофайли — вони збережуться на цьому пристрої.</span><button data-action="import">Додати</button></div>`;
+    ${added.length ? `${sectionHeading('Недавно додані', 'Усі', 'all-albums')}<div class="song-list">${added.slice(0, 8).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : ''}`;
 }
 
 function renderSearch() {
@@ -409,7 +408,6 @@ function renderSettings() {
   const profile = state.googleProfile;
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><h2>Налаштування</h2><span></span></header>
     <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name || profile.email)}` : 'Войти через Google'}"><span class="profile-button profile-button--large ${profilePictureUrl(profile) ? 'profile-button--photo' : ''}">${profileAvatarContents(profile)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name || profile.email) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
-    <button class="import-panel" data-action="import">${icon('plus')}<span><strong>Додати аудіофайли</strong><small>Файли залишаються лише на вашому пристрої</small></span>${icon('back', 'chevron')}</button>
     <button class="import-panel" data-action="drive-import">${icon('download')}<span><strong>Импорт из Google Диска</strong><small>Выбранные файлы сохраняются только на этом устройстве</small></span>${icon('back', 'chevron')}</button>
     <a class="import-panel profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>
     <p class="settings-note">Оновлення інтерфейсу завантажуються автоматично під час запуску, коли є інтернет. Збережена музика та сам застосунок доступні офлайн.</p>`;
@@ -565,7 +563,7 @@ async function handleGoogleDrivePickerResult(data, accessToken) {
       const blob = await response.blob();
       files.push(new File([blob], name, { type: mimeType || blob.type }));
     }
-    await importFiles(files);
+    await storeAudioFiles(files);
   } catch (error) {
     notify(error.message === 'not-audio-file' ? 'Выберите аудиофайлы из Google Диска.' : 'Не удалось загрузить выбранные аудиофайлы.');
   }
@@ -639,7 +637,7 @@ function renderPlayer() {
   const track = currentTrack();
   $('#mini-player').innerHTML = track
     ? `<button class="player-track" data-action="now-playing">${artMarkup(track.art, track.album, 'player-art')}<span class="player-copy"><strong>${safeText(track.title)}</strong><small>${safeText(track.artist)}</small></span></button><button class="player-control" data-action="toggle-play" aria-label="${state.isPlaying ? 'Пауза' : 'Відтворити'}">${icon(state.isPlaying ? 'pause' : 'play')}</button><button class="player-control player-next" data-action="next-track" aria-label="Наступна пісня">${icon('next')}</button>`
-    : `<button class="player-track" data-action="import">${artMarkup('local', '', 'player-art')}<span class="player-copy"><strong>Додати аудіофайл</strong><small>Офлайн-медіатека</small></span></button><button class="player-control" disabled aria-label="Немає пісень">${icon('play')}</button><button class="player-control player-next" disabled aria-label="Немає наступної пісні">${icon('next')}</button>`;
+    : `<div class="player-track player-track--empty">${artMarkup('local', '', 'player-art')}<span class="player-copy"><strong>Нічого не відтворюється</strong><small>Офлайн-медіатека</small></span></div><button class="player-control" disabled aria-label="Немає пісень">${icon('play')}</button><button class="player-control player-next" disabled aria-label="Немає наступної пісні">${icon('next')}</button>`;
 }
 
 function formatPlayerTime(seconds) {
@@ -1107,7 +1105,7 @@ async function playTrack(track) {
   }
 }
 
-async function importFiles(files) {
+async function storeAudioFiles(files) {
   const audioFiles = [...files].filter((file) => file.type.startsWith('audio/'));
   if (!audioFiles.length) return notify('Оберіть аудіофайл.');
   try {
@@ -1349,7 +1347,6 @@ document.addEventListener('click', async (event) => {
       render();
       notify('Ви вийшли з акаунта в застосунку.');
       break;
-    case 'import': $('#audio-import').click(); break;
     case 'drive-import': importFromGoogleDrive(); break;
     case 'play-track': playTrack(allTracks().find((track) => track.id === id)); break;
     case 'toggle-play': playTrack(currentTrack()); break;
@@ -1471,11 +1468,6 @@ $('#player-root').addEventListener('input', (event) => {
     if (time) time.textContent = formatPlayerTime(audio.currentTime);
   }
   if (event.target.id === 'player-volume') audio.volume = Number(event.target.value);
-});
-
-$('#audio-import').addEventListener('change', (event) => {
-  importFiles(event.target.files || []);
-  event.target.value = '';
 });
 
 audio.addEventListener('ended', async () => {
