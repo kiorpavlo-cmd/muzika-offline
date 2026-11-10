@@ -26,7 +26,7 @@ button { border: 0; cursor: pointer; }
 .content--pulling { transition: none; }
 .content--back-gesture { transition: none; will-change: transform; box-shadow: -12px 0 30px #0007; }
 .content--back-settling { transition: transform .24s cubic-bezier(.2, .8, .2, 1); }
-.back-gesture-preview { position: absolute; z-index: 0; overflow: auto; padding: 10px 20px 28px; background: #000; scrollbar-width: none; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; will-change: transform, opacity; pointer-events: none; }
+.back-gesture-preview { position: absolute; z-index: 0; overflow: auto; background: #000; scrollbar-width: none; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; will-change: transform, opacity; pointer-events: none; transition: none; }
 .back-gesture-preview::-webkit-scrollbar { display: none; }
 .back-gesture-preview--settling { transition: transform .24s cubic-bezier(.2, .8, .2, 1), opacity .24s ease; }
 .back-gesture-preview--rtl { transform-origin: right center; }

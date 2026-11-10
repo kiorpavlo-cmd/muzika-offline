@@ -937,20 +937,19 @@ function beginBackGesturePreview() {
     state.screen = activeScreen;
   }
 
-  const shellRect = $('.app-shell').getBoundingClientRect();
   const contentRect = content.getBoundingClientRect();
   const preview = document.createElement('div');
   const isRtl = getComputedStyle($('.app-shell')).direction === 'rtl';
-  preview.className = `back-gesture-preview${isRtl ? ' back-gesture-preview--rtl' : ''}`;
+  const previewClasses = ['content'];
+  if (previous.type === 'category') previewClasses.push('content--category-screen');
+  if (previous.type === 'category' && ['songs', 'albums'].includes(previous.category)) previewClasses.push('content--category-detail');
+  previewClasses.push('back-gesture-preview');
+  if (isRtl) previewClasses.push('back-gesture-preview--rtl');
+  preview.className = previewClasses.join(' ');
   preview.setAttribute('aria-hidden', 'true');
   preview.inert = true;
   preview.innerHTML = previousMarkup;
   Object.assign(preview.style, {
-    top: `${contentRect.top - shellRect.top}px`,
-    right: isRtl ? '0' : 'auto',
-    bottom: `${shellRect.bottom - contentRect.bottom}px`,
-    left: isRtl ? 'auto' : '0',
-    width: `${contentRect.width}px`,
     transform: `translate3d(${isRtl ? '' : '-'}28%, 0, 0)`,
     opacity: '.68'
   });
