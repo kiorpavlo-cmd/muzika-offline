@@ -142,6 +142,24 @@ function safeText(value = '') {
   return String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
 }
 
+function profilePictureUrl(profile) {
+  return typeof profile?.picture === 'string' && profile.picture.startsWith('https://') ? profile.picture : '';
+}
+
+function profileAvatarContents(profile = state.googleProfile) {
+  if (!profile) return '?';
+  const picture = profilePictureUrl(profile);
+  if (picture) return `<img class="profile-photo" src="${safeText(picture)}" alt="">`;
+  const name = String(profile.name || profile.email || '?').trim();
+  return safeText(name.split(/\s+/).slice(0, 2).map((part) => part[0] || '').join('').toUpperCase() || '?');
+}
+
+function profileButtonMarkup() {
+  const profile = state.googleProfile;
+  const label = profile ? `Профіль: ${safeText(profile.name || profile.email || 'Google')}` : 'Увійти через Google';
+  return `<button class="profile-button ${profilePictureUrl(profile) ? 'profile-button--photo' : ''}" data-action="settings" aria-label="${label}">${profileAvatarContents(profile)}</button>`;
+}
+
 function artMarkup(art, label, extra = '') {
   const readable = safeText(label || '♫');
   return `<div class="artwork artwork--${safeText(art || 'local')} ${extra}" aria-label="${readable}"><span class="artwork-mark">${art === 'mono' ? 'A.R.M.' : art === 'silver' ? 'A’STUDIO' : art === 'night' ? 'TAM' : art === 'halo' ? '◌' : art === 'coast' ? 'KISS' : '♫'}</span><span class="artwork-title">${readable}</span><span class="artwork-glow"></span></div>`;
@@ -300,7 +318,7 @@ function sectionHeading(title, action = '', href = '') {
 
 function renderHome() {
   const recently = [albums[7], albums[8], albums[0], albums[3], albums[4]];
-  return `<header class="page-header page-header--home"><h1>Домівка</h1><button class="profile-button" data-action="settings" aria-label="Профіль">ПК</button></header>
+  return `<header class="page-header page-header--home"><h1>Домівка</h1>${profileButtonMarkup()}</header>
     ${sectionHeading('Найпопулярніше для вас')}
     <div class="featured-strip">
       <button class="feature-card feature-card--favorite" data-action="open-item" data-kind="playlist" data-id="favorites">
@@ -315,7 +333,7 @@ function renderHome() {
 }
 
 function renderNew() {
-  return `<header class="page-header"><h1>Новинки</h1><button class="profile-button" data-action="settings" aria-label="Профіль">ПК</button></header>
+  return `<header class="page-header"><h1>Новинки</h1>${profileButtonMarkup()}</header>
     ${sectionHeading('Найкраще за 2026 рік', '›', 'all-albums')}${albumCards([albums[10], albums[4], albums[8], albums[1]])}
     ${sectionHeading('Нещодавно додані')}${albumCards([albums[1], albums[7], albums[9], albums[2]])}`;
 }
@@ -325,7 +343,7 @@ function renderRadio() {
     ['ONE', 'Станція одного'], ['HITS', 'Головні хіти'], ['COUNTRY', 'Кантрі'],
     ['MÚSICA', 'Музика світу'], ['club', 'Клубна'], ['Chill', 'Для відпочинку']
   ];
-  return `<header class="page-header"><h1>Радіо</h1><button class="profile-button" data-action="settings" aria-label="Профіль">ПК</button></header>
+  return `<header class="page-header"><h1>Радіо</h1>${profileButtonMarkup()}</header>
     <div class="station-grid">${stations.map(([word, title], index) => `<button class="station-card station-card--${index}" data-action="station" data-title="${title}"><span>${word}</span><small>♫ radio</small></button>`).join('')}</div>
     ${sectionHeading('Наживо')}
     <button class="live-card" data-action="station" data-title="Музика наживо"><div class="live-art">${artMarkup('blue', 'LIVE')}</div><div class="live-copy"><span>ЗАРАЗ В ЕФІРІ</span><strong>Музика без пауз</strong><small>Слухайте збережені треки навіть без мережі</small></div></button>
@@ -334,7 +352,7 @@ function renderRadio() {
 
 function renderLibrary() {
   const categories = Object.entries(categoryInfo).map(([key, [title, iconName]]) => `<button class="category-row" data-action="category" data-category="${key}">${icon(iconName)}<span>${title}</span>${icon('back', 'chevron')}</button>`).join('');
-  return `<header class="page-header page-header--library"><h1>Медіатека</h1><button class="profile-button" data-action="settings" aria-label="Профіль">ПК</button></header>
+  return `<header class="page-header page-header--library"><h1>Медіатека</h1>${profileButtonMarkup()}</header>
     <div class="category-list">${categories}</div>
     ${sectionHeading('Недавно додані', 'Усі', 'all-albums')}${albumCards([albums[10], albums[9], albums[7], albums[8]])}
     <div class="library-footnote">${icon('download')}<span>Додайте свої аудіофайли — вони збережуться на цьому пристрої.</span><button data-action="import">Додати</button></div>`;
@@ -397,9 +415,8 @@ function renderCategory() {
 function renderSettings() {
   const online = navigator.onLine;
   const profile = state.googleProfile;
-  const initials = profile?.name ? profile.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase() : 'ПК';
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><h2>Налаштування</h2><span></span></header>
-    <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name)}` : 'Войти через Google'}"><span class="profile-button profile-button--large">${safeText(initials)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
+    <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name || profile.email)}` : 'Войти через Google'}"><span class="profile-button profile-button--large ${profilePictureUrl(profile) ? 'profile-button--photo' : ''}">${profileAvatarContents(profile)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name || profile.email) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
     <div class="settings-group"><div class="settings-row"><span>Стан мережі</span><strong class="${online ? 'online-label' : 'offline-label'}">${online ? 'Підключено' : 'Офлайн'}</strong></div><div class="settings-row"><span>Оновлення застосунку</span><button data-action="check-updates">Оновити</button></div><div class="settings-row"><span>Офлайн-аудіо</span><strong>${state.localTracks.length} пісень</strong></div></div>
     <button class="import-panel" data-action="import">${icon('plus')}<span><strong>Додати аудіофайли</strong><small>Файли залишаються лише на вашому пристрої</small></span>${icon('back', 'chevron')}</button>
     <button class="import-panel" data-action="drive-import">${icon('download')}<span><strong>Импорт из Google Диска</strong><small>Выбранные файлы сохраняются только на этом устройстве</small></span>${icon('back', 'chevron')}</button>
@@ -427,7 +444,7 @@ function decodeGoogleProfile(credential) {
     const bytes = Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
     const claims = JSON.parse(new TextDecoder().decode(bytes));
     if (!claims.sub || !claims.email) return null;
-    return { id: claims.sub, name: claims.name || claims.email, email: claims.email };
+    return { id: claims.sub, name: claims.name || claims.email, email: claims.email, picture: typeof claims.picture === 'string' ? claims.picture : '' };
   } catch {
     return null;
   }
