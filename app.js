@@ -1285,15 +1285,16 @@ async function forceRefreshOfflineShell(pulledDistance = 0) {
   }
 }
 
-content.addEventListener('touchstart', (event) => {
+appShell.addEventListener('touchstart', (event) => {
   if (event.touches.length !== 1 || content.scrollTop > 0 || refreshRunning || $('#modal-root').childElementCount) return;
+  if (event.target.closest?.('#mini-player, #tab-bar, #player-root, #modal-root')) return;
   if (document.activeElement?.matches('input, textarea') && state.screen.tab !== 'search') return;
   content.classList.add('content--pulling');
   pullStart = { x: event.touches[0].clientX, y: event.touches[0].clientY };
   pullDistance = 0;
 }, { passive: true });
 
-content.addEventListener('touchmove', (event) => {
+appShell.addEventListener('touchmove', (event) => {
   if (!pullStart || event.touches.length !== 1 || content.scrollTop > 0) return;
   const touch = event.touches[0];
   const deltaY = touch.clientY - pullStart.y;
@@ -1310,7 +1311,7 @@ content.addEventListener('touchmove', (event) => {
   updatePullIndicator(pullDistance, pullDistance >= PULL_REFRESH_THRESHOLD ? 'Відпустіть, щоб оновити' : 'Потягніть вниз для оновлення');
 }, { passive: false });
 
-content.addEventListener('touchend', () => {
+appShell.addEventListener('touchend', () => {
   const shouldRefresh = pullDistance >= PULL_REFRESH_THRESHOLD;
   const releasedDistance = pullDistance;
   pullStart = null;
@@ -1319,7 +1320,7 @@ content.addEventListener('touchend', () => {
   else resetPullIndicator();
 }, { passive: true });
 
-content.addEventListener('touchcancel', () => {
+appShell.addEventListener('touchcancel', () => {
   pullStart = null;
   pullDistance = 0;
   resetPullIndicator();
