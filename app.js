@@ -709,7 +709,34 @@ let refreshRunning = false;
 let pullStart = null;
 let pullDistance = 0;
 const pullRefreshIndicator = $('#pull-refresh');
+const appUpdateScreen = $('#app-update-screen');
 const PULL_REFRESH_THRESHOLD = 86;
+const MIN_UPDATE_SCREEN_DURATION = 950;
+let updateScreenStartedAt = 0;
+
+function showAppUpdateScreen() {
+  if (!appUpdateScreen.classList.contains('app-update-screen--visible')) updateScreenStartedAt = performance.now();
+  appUpdateScreen.hidden = false;
+  appUpdateScreen.setAttribute('aria-hidden', 'false');
+  requestAnimationFrame(() => appUpdateScreen.classList.add('app-update-screen--visible'));
+}
+
+function reloadAfterAppUpdate() {
+  showAppUpdateScreen();
+  const visibleFor = performance.now() - updateScreenStartedAt;
+  setTimeout(() => location.reload(), Math.max(0, MIN_UPDATE_SCREEN_DURATION - visibleFor));
+}
+
+function hideAppUpdateScreen() {
+  appUpdateScreen.classList.remove('app-update-screen--visible');
+  appUpdateScreen.setAttribute('aria-hidden', 'true');
+  setTimeout(() => {
+    if (!appUpdateScreen.classList.contains('app-update-screen--visible')) {
+      appUpdateScreen.hidden = true;
+      updateScreenStartedAt = 0;
+    }
+  }, 160);
+}
 
 function updatePullIndicator(distance, label) {
   const offset = Math.min(92, Math.round(distance));
@@ -770,13 +797,17 @@ function askWorkerToRefreshShell(worker) {
 
 async function forceRefreshOfflineShell() {
   if (refreshRunning) return;
+  if (!navigator.onLine) {
+    notify('Немає інтернету. Попередня версія та музика залишилися доступні офлайн.');
+    return;
+  }
   refreshRunning = true;
   pullRefreshIndicator.classList.add('pull-refresh--loading', 'pull-refresh--visible');
   pullRefreshIndicator.setAttribute('aria-hidden', 'false');
   pullRefreshIndicator.querySelector('.pull-refresh-label').textContent = 'Завантажуємо застосунок для офлайн…';
+  showAppUpdateScreen();
 
   try {
-    if (!navigator.onLine) throw new Error('offline');
     if (!('serviceWorker' in navigator)) throw new Error('service-worker-unavailable');
 
     let registration = await navigator.serviceWorker.getRegistration();
@@ -794,9 +825,10 @@ async function forceRefreshOfflineShell() {
 
     pullRefreshIndicator.querySelector('.pull-refresh-label').textContent = 'Готово. Перезапускаємо…';
     notify('Офлайн-версію оновлено. Перезапускаємо застосунок…');
-    setTimeout(() => location.reload(), 350);
+    reloadAfterAppUpdate();
   } catch {
     refreshRunning = false;
+    hideAppUpdateScreen();
     resetPullIndicator();
     notify(navigator.onLine
       ? 'Не вдалося оновити офлайн-кеш. Попередня версія та музика збережені.'
@@ -1001,17 +1033,21 @@ async function startServiceWorkerUpdateCheck() {
     const shouldReload = () => {
       if (!hadController || reloadScheduled) return;
       reloadScheduled = true;
-      setTimeout(() => location.reload(), 250);
+      reloadAfterAppUpdate();
     };
     registration.addEventListener('updatefound', () => {
       const worker = registration.installing;
+      if (hadController) showAppUpdateScreen();
       worker?.addEventListener('statechange', () => {
         if (worker.state === 'installed' && navigator.serviceWorker.controller) shouldReload();
+        else if (worker.state === 'redundant') hideAppUpdateScreen();
       });
     });
     if (registration.installing) {
+      if (hadController) showAppUpdateScreen();
       registration.installing.addEventListener('statechange', (event) => {
         if (event.target.state === 'installed' && navigator.serviceWorker.controller) shouldReload();
+        else if (event.target.state === 'redundant') hideAppUpdateScreen();
       });
     }
     await registration.update().catch(() => {});

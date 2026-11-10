@@ -27,6 +27,11 @@ button { border: 0; cursor: pointer; }
 .pull-refresh-spinner { width: 17px; height: 17px; flex: 0 0 17px; border: 2px solid #77777d; border-top-color: var(--blue); border-radius: 50%; transform: rotate(-35deg); }
 .pull-refresh--loading .pull-refresh-spinner { animation: pull-spin .75s linear infinite; }
 @keyframes pull-spin { to { transform: rotate(325deg); } }
+.app-update-screen { position: absolute; z-index: 20; inset: 0; background: #fff; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .14s ease; }
+.app-update-screen--visible { opacity: 1; visibility: visible; pointer-events: auto; }
+.app-update-spinner { position: absolute; top: 37%; left: 50%; width: 46px; height: 46px; color: #b9b9bc; transform: translate(-50%, -50%); animation: ios-spinner-rotate 1s steps(8, end) infinite; }
+@keyframes ios-spinner-rotate { to { rotate: 360deg; } }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 .page-header { display: flex; align-items: center; justify-content: space-between; min-height: 66px; margin: 0 0 26px; }
 .page-header h1, .category-title, .detail-heading h1 { margin: 0; font-size: clamp(36px, 9vw, 48px); line-height: 1.02; letter-spacing: -.04em; font-weight: 760; }
