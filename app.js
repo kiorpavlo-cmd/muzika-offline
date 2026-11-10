@@ -531,11 +531,4 @@ async function initialize() {
   startServiceWorkerUpdateCheck();
 }
 
-const statusTime = $('.status-time');
-function updateStatusTime() {
-  statusTime.textContent = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
-}
-updateStatusTime();
-setInterval(updateStatusTime, 30_000);
-
 initialize();
