@@ -213,6 +213,7 @@ button { border: 0; cursor: pointer; }
 .youtube-menu-quick-action { min-width: 0; min-height: 66px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 7px; padding: 2px 3px; background: transparent; color: #f5f5f7; font-size: 13px; line-height: 1.2; text-align: center; }
 .youtube-menu-quick-action .icon { width: 25px; height: 25px; flex: 0 0 25px; }
 .youtube-menu-quick-action span { max-width: 100%; }
+.youtube-menu-quick-action:disabled { opacity: .48; cursor: default; }
 .youtube-favorite-active { fill: #ffd60a; color: #ffd60a; }
 .youtube-menu-group { padding: 5px 0; border-bottom: 1px solid #444448; }
 .youtube-menu-group--last { border-bottom: 0; }
