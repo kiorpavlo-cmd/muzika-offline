@@ -75,7 +75,7 @@ const state = {
 let youtubeSearchTimer = null;
 let youtubeSearchController = null;
 let youtubeSearchRequestId = 0;
-const YOUTUBE_API_KEY = window.MUZIKA_CONFIG?.youtubeApiKey || '';
+const YOUTUBE_API_KEY = 'AIzaSyC2srpkO7s3ojMb4b5OpQ2YV2Ep0RoNJRM';
 
 const database = {
   open() {
