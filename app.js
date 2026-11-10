@@ -1340,9 +1340,6 @@ async function forceRefreshOfflineShell(pulledDistance = 0) {
   } catch {
     refreshRunning = false;
     resetPullIndicator();
-    notify(navigator.onLine
-      ? 'Не вдалося оновити офлайн-кеш. Попередня версія та музика збережені.'
-      : 'Немає інтернету. Попередня версія та музика залишилися доступні офлайн.');
   }
 }
 
