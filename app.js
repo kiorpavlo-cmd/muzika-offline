@@ -338,7 +338,7 @@ function renderLibrary() {
 }
 
 function renderSearch() {
-  return `<header class="search-header"><div class="search-box">${icon('search')}<input id="search-input" type="search" placeholder="Виконавці, пісні, альбоми" value="${safeText(state.searchText)}" autocomplete="off"><button id="search-clear" class="search-clear" data-action="clear-search-input" aria-label="Очистити запит" ${state.searchText.trim() ? '' : 'hidden'}>${icon('close')}</button></div><button class="search-close" data-action="close-search" aria-label="Закрити пошук">${icon('close')}</button></header>
+  return `<header class="search-header"><div class="search-box">${icon('search')}<input id="search-input" type="search" placeholder="Виконавці, пісні, альбоми" value="${safeText(state.searchText)}" autocomplete="off"></div><button class="search-close" data-action="close-search" aria-label="Очистити пошук або закрити">${icon('close')}</button></header>
     <div id="search-body">${renderSearchBody()}</div>`;
 }
 
@@ -1280,8 +1280,20 @@ document.addEventListener('click', async (event) => {
       break;
     }
     case 'clear-search': state.recentSearches = []; localStorage.removeItem('muzika-searches'); render(); break;
-    case 'clear-search-input': state.searchText = ''; state.searchCategory = 'top'; render(); $('#search-input')?.focus({ preventScroll: true }); break;
-    case 'close-search': state.searchText = ''; state.searchCategory = 'top'; state.tab = 'home'; state.screenStack = []; state.screen = { type: 'tab', tab: 'home' }; render(); break;
+    case 'close-search':
+      if (state.searchText.trim()) {
+        state.searchText = '';
+        state.searchCategory = 'top';
+        render();
+        $('#search-input')?.focus({ preventScroll: true });
+      } else {
+        state.searchCategory = 'top';
+        state.tab = 'home';
+        state.screenStack = [];
+        state.screen = { type: 'tab', tab: 'home' };
+        render();
+      }
+      break;
     case 'recent-search': state.searchText = term; state.searchCategory = 'top'; render(); break;
     case 'search-category': state.searchCategory = button.dataset.category; $('#search-body').innerHTML = renderSearchBody(); break;
     case 'song-menu': {
@@ -1353,7 +1365,6 @@ content.addEventListener('input', (event) => {
   if (event.target.id !== 'search-input') return;
   state.searchText = event.target.value;
   state.searchCategory = 'top';
-  $('#search-clear').hidden = !state.searchText.trim();
   $('#search-body').innerHTML = renderSearchBody();
 });
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'muzika-shell-v5';
+const CACHE_NAME = 'muzika-shell-v6';
 const STAGING_PREFIX = 'muzika-refresh-staging-';
 const APP_FILES = [
   './',
