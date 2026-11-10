@@ -350,7 +350,7 @@ function handleHttps(req, res, token) {
   fs.createReadStream(filePath).pipe(res);
 }
 
-function handleSetup(req, res, profile, hostname, token) {
+function handleSetup(req, res, profile, hostname, lanAddresses, token) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/install-ca.mobileconfig') {
     res.writeHead(200, {
@@ -362,10 +362,27 @@ function handleSetup(req, res, profile, hostname, token) {
   }
 
   if (req.method === 'GET' && url.pathname === '/health') return writeJson(res, 200, { ok: true, hostname });
+  const hostHeader = req.headers.host || hostname;
+  const setupHost = hostHeader.replace(/:\d+$/, '').toLowerCase();
+  if (!/^[a-z0-9.-]+$/.test(setupHost) || (setupHost !== hostname && !lanAddresses.includes(setupHost))) {
+    return writeJson(res, 400, { error: 'Відкрийте сторінку за адресою Mac у локальній мережі.' });
+  }
+
+  const secure = Boolean(req.socket.encrypted);
+  const apiOrigin = `https://${setupHost}:${HTTPS_PORT}`;
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-  const setupHost = (req.headers.host || hostname).replace(/:\d+$/, '');
-  const appUrl = `https://${setupHost}:${HTTPS_PORT}/?token=${encodeURIComponent(token)}`;
-  res.end(`<!doctype html><meta name="viewport" content="width=device-width"><title>Muzika setup</title><main style="font:17px system-ui;max-width:42rem;margin:3rem auto;padding:0 1rem;color:#222"><h1>Muzika: локальне завантаження</h1><p>1. <a href="/install-ca.mobileconfig">Встановіть сертифікат Muzika</a> на iPhone.</p><p>2. У налаштуваннях iPhone увімкніть повну довіру до «Muzika Local Audio CA» у розділі «Довірені сертифікати».</p><p>3. Відкрийте Muzika за захищеним посиланням і додайте її на екран «Домівка».</p><p><a href="${appUrl}">Відкрити Muzika на цьому iPhone</a></p></main>`);
+  if (!secure) {
+    const secureSetupUrl = `${apiOrigin}/setup`;
+    return res.end(`<!doctype html><html lang="uk"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>Muzika — підключення</title><main style="font:17px/1.5 system-ui,-apple-system,sans-serif;max-width:42rem;margin:2rem auto;padding:0 1rem;color:#222"><h1>Muzika: завантаження на iPhone</h1><p><strong>Під’єднайте iPhone і Mac до однієї мережі Wi‑Fi.</strong> Через 5G телефон не зможе під’єднатися до Mac.</p><ol><li><a href="/install-ca.mobileconfig">Завантажте та встановіть профіль сертифіката Muzika.</a></li><li>У «Параметри» → «Загальні» → «Про пристрій» → «Довірені сертифікати» увімкніть повну довіру до «Muzika Local Audio CA».</li><li>Після цього відкрийте <a href="${secureSetupUrl}">захищену сторінку продовження</a>.</li></ol><p>Профіль довіри й посилання підключення працюватимуть лише з цим Mac у тій самій Wi‑Fi мережі.</p></main></html>`);
+  }
+
+  const pwaUrl = new URL('https://kiorpavlo-cmd.github.io/muzika-offline/');
+  pwaUrl.hash = new URLSearchParams({
+    'muzika-download-server': apiOrigin,
+    'muzika-download-token': token
+  }).toString();
+  const appUrl = pwaUrl.href.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  res.end(`<!doctype html><html lang="uk"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>Muzika — підключення</title><main style="font:17px/1.5 system-ui,-apple-system,sans-serif;max-width:42rem;margin:2rem auto;padding:0 1rem;color:#222"><h1>Muzika: підключення завершено</h1><p>Натисніть, щоб відкрити GitHub-версію Muzika з підключенням до локального сервера Mac:</p><p><a href="${appUrl}">Відкрити Muzika</a></p><p>Якщо посилання відкрило Safari, а ви користуєтеся застосунком з іконки на екрані «Домівка»: скопіюйте посилання вище, відкрийте Muzika з іконки → «Налаштування» → «Завантаження з Mac», вставте посилання та натисніть «Підключити сервер».</p><p>Залиште Muzika Server запущеним на Mac, поки триває завантаження. Після цього аудіо залишиться в медіатеці на iPhone і працюватиме офлайн.</p><p style="color:#666;font-size:14px">Адреса локального сервера: ${apiOrigin}</p></main></html>`);
 }
 
 function main() {
@@ -376,12 +393,19 @@ function main() {
     ca: fs.readFileSync(certs.caCert)
   };
 
-  const secureServer = https.createServer(tlsOptions, (req, res) => handleHttps(req, res, certs.token));
+  const secureServer = https.createServer(tlsOptions, (req, res) => {
+    const requestUrl = new URL(req.url, `https://${req.headers.host || 'localhost'}`);
+    if (requestUrl.pathname === '/setup' || requestUrl.pathname === '/install-ca.mobileconfig') {
+      return handleSetup(req, res, certs.profile, certs.hostname, certs.lanAddresses, certs.token);
+    }
+    return handleHttps(req, res, certs.token);
+  });
   secureServer.on('error', (error) => console.error(`Не вдалося відкрити HTTPS-порт ${HTTPS_PORT}: ${error.message}`));
   secureServer.listen(HTTPS_PORT, HOST, () => {
-      console.log(`Muzika працює: https://${certs.hostname}:${HTTPS_PORT}/?token=${certs.token}`);
+      console.log(`Налаштування Muzika: https://${certs.hostname}:${HTTPS_PORT}/setup`);
       for (const address of certs.lanAddresses) {
-        console.log(`Muzika в мережі: https://${address}:${HTTPS_PORT}/?token=${certs.token}`);
+        console.log(`Налаштування iPhone у Wi-Fi: https://${address}:${HTTPS_PORT}/setup`);
+        console.log(`Початкова сторінка iPhone: http://${address}:${HTTP_PORT}/`);
         console.log(`Сертифікат в мережі: http://${address}:${HTTP_PORT}/install-ca.mobileconfig`);
       }
       console.log(`Встановлення сертифіката iPhone: http://${certs.hostname}:${HTTP_PORT}/install-ca.mobileconfig`);
@@ -394,7 +418,7 @@ function main() {
       console.log('Завантажені аудіофайли зберігаються у локальній медіатеці застосунку на пристрої.');
     });
 
-  const setupServer = http.createServer((req, res) => handleSetup(req, res, certs.profile, certs.hostname, certs.token));
+  const setupServer = http.createServer((req, res) => handleSetup(req, res, certs.profile, certs.hostname, certs.lanAddresses, certs.token));
   setupServer.on('error', (error) => console.error(`Не вдалося відкрити HTTP-порт ${HTTP_PORT}: ${error.message}`));
   setupServer.listen(HTTP_PORT, HOST, () => {
       console.log(`Сторінка встановлення сертифіката: http://${certs.hostname}:${HTTP_PORT}/`);

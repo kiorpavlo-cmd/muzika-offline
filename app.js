@@ -85,23 +85,34 @@ let youtubeSearchTimer = null;
 let youtubeSearchController = null;
 let youtubeSearchRequestId = 0;
 const activeAudioDownloads = new Set();
-const downloadConnection = (() => {
-  const setup = new URLSearchParams(location.hash.slice(1));
-  const serverValue = setup.get('muzika-download-server') || '';
-  const tokenValue = setup.get('muzika-download-token') || '';
-  if (serverValue && /^[a-f0-9]{64}$/i.test(tokenValue)) {
-    try {
-      const serverUrl = new URL(serverValue);
-      if (serverUrl.protocol === 'https:' && serverUrl.pathname === '/' && !serverUrl.search && !serverUrl.hash) {
-        localStorage.setItem('muzika-download-server', serverUrl.origin);
-        localStorage.setItem('muzika-download-token', tokenValue);
-        history.replaceState(null, '', `${location.pathname}${location.search}`);
-      }
-    } catch { /* Ignore an invalid server setup link. */ }
+function parseDownloadConnectionLink(value) {
+  try {
+    const link = new URL(value.trim(), location.href);
+    if (link.origin !== location.origin) return null;
+    const setup = new URLSearchParams(link.hash.slice(1));
+    const serverUrl = new URL(setup.get('muzika-download-server') || '');
+    const token = setup.get('muzika-download-token') || '';
+    if (serverUrl.protocol !== 'https:' || serverUrl.pathname !== '/' || serverUrl.search || serverUrl.hash || !/^[a-f0-9]{64}$/i.test(token)) return null;
+    return { server: serverUrl.origin, token };
+  } catch {
+    return null;
   }
+}
+
+const downloadConnection = (() => {
+  const fromLink = parseDownloadConnectionLink(location.href);
+  if (fromLink) {
+    localStorage.setItem('muzika-download-server', fromLink.server);
+    localStorage.setItem('muzika-download-token', fromLink.token);
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
+  }
+  const saved = parseDownloadConnectionLink(`${location.origin}${location.pathname}#${new URLSearchParams({
+    'muzika-download-server': localStorage.getItem('muzika-download-server') || '',
+    'muzika-download-token': localStorage.getItem('muzika-download-token') || ''
+  })}`);
   return {
-    server: localStorage.getItem('muzika-download-server') || '',
-    token: localStorage.getItem('muzika-download-token') || ''
+    server: saved?.server || '',
+    token: saved?.token || ''
   };
 })();
 const YOUTUBE_API_KEY = 'AIzaSyC2srpkO7s3ojMb4b5OpQ2YV2Ep0RoNJRM';
@@ -810,6 +821,7 @@ function renderSettings() {
   const profile = state.googleProfile;
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><h2>Налаштування</h2><span></span></header>
     <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name || profile.email)}` : 'Войти через Google'}"><span class="profile-button profile-button--large ${profilePictureUrl(profile) ? 'profile-button--photo' : ''}">${profileAvatarContents(profile)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name || profile.email) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
+    <section class="settings-connection-card"><div class="settings-connection-heading"><strong>Завантаження з Mac</strong><small>${downloadConnection.server ? `Підключено: ${safeText(downloadConnection.server)}` : 'Вставте посилання налаштування зі сторінки Mac'}</small></div><textarea id="download-connection-input" rows="3" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="Вставте повне посилання Muzika"></textarea><button class="settings-connection-save" data-action="connect-download-server">Підключити сервер</button></section>
     <a class="settings-action-card profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>`;
 }
 
@@ -1637,6 +1649,20 @@ document.addEventListener('click', async (event) => {
     case 'open-item': pushScreen({ type: 'item', kind, id }); break;
     case 'back': navigateBack(); break;
     case 'settings': pushScreen({ type: 'settings' }); break;
+    case 'connect-download-server': {
+      const connection = parseDownloadConnectionLink($('#download-connection-input')?.value || '');
+      if (!connection) {
+        notify('Посилання підключення не розпізнано. Скопіюйте його зі сторінки налаштування Mac.');
+        break;
+      }
+      downloadConnection.server = connection.server;
+      downloadConnection.token = connection.token;
+      localStorage.setItem('muzika-download-server', connection.server);
+      localStorage.setItem('muzika-download-token', connection.token);
+      render();
+      notify('✅ Сервер Mac підключено. Можна завантажувати аудіо.');
+      break;
+    }
     case 'google-account': openGoogleAccount(); break;
     case 'close-google-account': closeGoogleAccount(); break;
     case 'google-signout':
