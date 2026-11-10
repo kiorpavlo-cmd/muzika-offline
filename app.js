@@ -343,9 +343,12 @@ function renderSearch() {
 }
 
 function renderSearchBody() {
-  const matches = state.searchText.trim() ? allTracks().filter((track) => `${track.title} ${track.artist} ${track.album}`.toLowerCase().includes(state.searchText.toLowerCase())) : [];
-  return state.searchText.trim()
-    ? `<div class="search-results-label">${matches.length ? 'Результати' : 'Нічого не знайдено'}</div><div class="song-list">${prioritizePinned(matches).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>`
+  const query = state.searchText.trim();
+  const matches = query ? allTracks().filter((track) => `${track.title} ${track.artist} ${track.album}`.toLowerCase().includes(query.toLowerCase())) : [];
+  const youtubeMusicUrl = `https://music.youtube.com/search?q=${encodeURIComponent(query)}`;
+  return query
+    ? `<section class="global-search-section"><div class="search-results-label">Глобальний пошук</div><a class="global-search-link" href="${safeText(youtubeMusicUrl)}" target="_blank" rel="noopener noreferrer">${icon('search')}<span><strong>YouTube Music</strong><small>Відкрити глобальні результати онлайн</small></span>${icon('back', 'chevron')}</a></section>
+      <div class="search-results-label">Медіатека на пристрої</div>${matches.length ? `<div class="song-list">${prioritizePinned(matches).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : '<div class="empty-state">У вашій офлайн-медіатеці збігів немає.</div>'}`
     : `<div class="section-heading"><h2>Недавні пошуки</h2><button class="text-action text-action--red" data-action="clear-search">Очистити</button></div>
       <div class="recent-searches">${state.recentSearches.map((term) => `<button data-action="recent-search" data-term="${safeText(term)}">${icon('search')}<span>${safeText(term)}</span>${icon('more')}</button>`).join('') || '<div class="empty-state">Ваші пошуки з’являться тут.</div>'}</div>`;
 }
@@ -1341,7 +1344,11 @@ content.addEventListener('input', (event) => {
 
 content.addEventListener('keydown', (event) => {
   if (event.target.id === 'search-input' && event.key === 'Enter') {
-    rememberSearch(state.searchText);
+    const query = state.searchText.trim();
+    if (query) {
+      rememberSearch(query);
+      window.open(`https://music.youtube.com/search?q=${encodeURIComponent(query)}`, '_blank', 'noopener,noreferrer');
+    }
     event.target.blur();
   }
 });

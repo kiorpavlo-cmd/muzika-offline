@@ -146,6 +146,13 @@ button { border: 0; cursor: pointer; }
 .search-box input::-webkit-search-cancel-button { display: none; }
 .search-close { width: 48px; height: 48px; }
 .search-results-label { margin: 4px 0 12px; color: #b5b5ba; font-size: 14px; }
+.global-search-section { margin-bottom: 20px; }
+.global-search-link { min-height: 64px; display: flex; align-items: center; gap: 13px; padding: 10px 12px; border: 1px solid #343437; border-radius: 18px; background: #1d1d1f; color: inherit; text-decoration: none; }
+.global-search-link > .icon:first-child { width: 21px; color: var(--blue); }
+.global-search-link > span { flex: 1; display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.global-search-link strong { font-size: 15px; }
+.global-search-link small { color: var(--muted); font-size: 13px; }
+.global-search-link .chevron { color: var(--muted); transform: rotate(180deg); }
 .recent-searches { border-top: 1px solid var(--line); }
 .recent-searches button { width: 100%; min-height: 64px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); background: transparent; text-align: left; }
 .recent-searches button span { flex: 1; }.recent-searches .icon { width: 20px; color: #8e8e93; }
