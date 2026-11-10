@@ -237,6 +237,12 @@ button { border: 0; cursor: pointer; }
 @media (max-width: 700px) and (display-mode: standalone) { @supports (-webkit-touch-callout: none) { #ios-home-indicator { position: absolute; z-index: 5; bottom: 8px; left: 50%; display: block; width: 108px; height: 4px; border-radius: 4px; background: #8d8d93; transform: translateX(-50%); pointer-events: none; } } }
 .toast { position: absolute; z-index: 7; left: 50%; bottom: calc(158px + var(--safe-bottom)); max-width: calc(100% - 40px); padding: 11px 16px; border-radius: 20px; background: #303034ee; border: 1px solid #45454a; color: white; font-size: 14px; text-align: center; opacity: 0; transform: translate(-50%, 12px); pointer-events: none; transition: opacity .2s, transform .2s; }
 .toast.visible { opacity: 1; transform: translate(-50%, 0); }
+.orientation-guard { position: fixed; z-index: 20; inset: 0; display: none; place-items: center; padding: 24px; background: #000; color: #f5f5f7; text-align: center; }
+.orientation-guard-card { display: flex; max-width: 300px; flex-direction: column; align-items: center; gap: 12px; }
+.orientation-rotate-icon { color: var(--blue); font-size: 54px; line-height: 1; }
+.orientation-guard strong { font-size: 21px; }
+.orientation-guard small { color: var(--muted); font-size: 15px; line-height: 1.45; }
+@media (orientation: landscape) and (max-width: 900px) { .orientation-guard { display: grid; } }
 
 @media (max-width: 360px) { .content { padding-inline: 16px; }.mini-player, .tab-bar { left: 14px; right: 14px; }.page-header h1 { font-size: 37px; }.category-row > span { font-size: 19px; }.feature-card { flex-basis: 80%; }.album-card { flex-basis: 48%; } }
 @media (min-width: 540px) { .content { padding-left: 28px; padding-right: 28px; }.featured-strip, .album-strip { margin-left: -28px; margin-right: -28px; padding-left: 28px; padding-right: 28px; }.feature-card { flex-basis: 47%; }.album-card { flex-basis: 30%; }.album-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }

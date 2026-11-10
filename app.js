@@ -1526,6 +1526,7 @@ async function startServiceWorkerUpdateCheck() {
 }
 
 async function initialize() {
+  tryLockPortraitOrientation();
   const refreshScrollTop = restoreScreenAfterRefresh();
   try { state.localTracks = await database.all(); } catch { state.localTracks = []; }
   const validTrackIds = new Set(state.localTracks.map((track) => track.id));
@@ -1543,3 +1544,15 @@ async function initialize() {
 }
 
 initialize();
+
+function tryLockPortraitOrientation() {
+  const orientation = window.screen?.orientation;
+  if (typeof orientation?.lock !== 'function') return;
+  try {
+    orientation.lock('portrait-primary').catch(() => {});
+  } catch {
+    // Manifest orientation and the landscape fallback cover browsers that reject the lock.
+  }
+}
+
+document.addEventListener('pointerdown', tryLockPortraitOrientation, { once: true, passive: true });
