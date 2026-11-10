@@ -334,7 +334,7 @@ function renderRadio() {
 
 function renderLibrary() {
   const categories = Object.entries(categoryInfo).map(([key, [title, iconName]]) => `<button class="category-row" data-action="category" data-category="${key}">${icon(iconName)}<span>${title}</span>${icon('back', 'chevron')}</button>`).join('');
-  return `<header class="page-header page-header--library"><h1>Медіатека</h1><div class="header-actions"><button class="header-pill" data-action="import" aria-label="Додати музику">${icon('plus')}<span class="pill-divider"></span>${icon('menu')}</button><button class="profile-button" data-action="settings" aria-label="Профіль">ПК</button></div></header>
+  return `<header class="page-header page-header--library"><h1>Медіатека</h1><button class="profile-button" data-action="settings" aria-label="Профіль">ПК</button></header>
     <div class="category-list">${categories}</div>
     ${sectionHeading('Недавно додані', 'Усі', 'all-albums')}${albumCards([albums[10], albums[9], albums[7], albums[8]])}
     <div class="library-footnote">${icon('download')}<span>Додайте свої аудіофайли — вони збережуться на цьому пристрої.</span><button data-action="import">Додати</button></div>`;
