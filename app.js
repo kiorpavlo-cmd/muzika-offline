@@ -84,9 +84,6 @@ const state = {
 let youtubeSearchTimer = null;
 let youtubeSearchController = null;
 let youtubeSearchRequestId = 0;
-const activeAudioDownloads = new Set();
-const MAX_DIRECT_AUDIO_BYTES = 120 * 1024 * 1024;
-let directAudioDownloadController = null;
 localStorage.removeItem('muzika-download-server');
 localStorage.removeItem('muzika-download-token');
 if (location.hash.includes('muzika-download-server=') || location.hash.includes('muzika-download-token=')) {
@@ -589,196 +586,6 @@ async function shareYouTubeResult(item, kind, id) {
   }
 }
 
-function directAudioFormat(url, contentType) {
-  const type = (contentType || '').split(';', 1)[0].trim().toLowerCase();
-  const extension = /\.([a-z0-9]{2,5})$/i.exec(url.pathname)?.[1]?.toLowerCase() || '';
-  const byExtension = {
-    mp3: ['audio/mpeg', 'mp3'],
-    m4a: ['audio/mp4', 'm4a'],
-    mp4: ['audio/mp4', 'm4a'],
-    aac: ['audio/aac', 'aac'],
-    ogg: ['audio/ogg', 'ogg'],
-    opus: ['audio/ogg', 'opus'],
-    wav: ['audio/wav', 'wav'],
-    flac: ['audio/flac', 'flac']
-  };
-  const byType = {
-    'audio/mpeg': ['audio/mpeg', 'mp3'],
-    'audio/mp3': ['audio/mpeg', 'mp3'],
-    'audio/mp4': ['audio/mp4', 'm4a'],
-    'audio/x-m4a': ['audio/mp4', 'm4a'],
-    'audio/aac': ['audio/aac', 'aac'],
-    'audio/x-aac': ['audio/aac', 'aac'],
-    'audio/ogg': ['audio/ogg', 'ogg'],
-    'audio/opus': ['audio/opus', 'opus'],
-    'audio/wav': ['audio/wav', 'wav'],
-    'audio/x-wav': ['audio/wav', 'wav'],
-    'audio/flac': ['audio/flac', 'flac'],
-    'audio/x-flac': ['audio/flac', 'flac']
-  };
-  if (type.startsWith('audio/')) {
-    const supportedType = byType[type];
-    if (!supportedType) return null;
-    const preferredExtension = extension === 'opus' && type === 'audio/ogg' ? 'opus' : supportedType[1];
-    return { type: supportedType[0], extension: preferredExtension };
-  }
-  if (type && !['application/octet-stream', 'binary/octet-stream', 'application/force-download', 'application/download'].includes(type)) return null;
-  return byExtension[extension] ? { type: byExtension[extension][0], extension: byExtension[extension][1] } : null;
-}
-
-function isYouTubeMediaHost(hostname) {
-  const host = hostname.toLowerCase();
-  return host === 'youtu.be' || host.endsWith('.youtu.be') || host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com') || host === 'googlevideo.com' || host.endsWith('.googlevideo.com');
-}
-
-function safeAudioFilename(value) {
-  return value.replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 180);
-}
-
-function updateDirectDownloadProgress(loaded, total) {
-  const progress = $('#direct-audio-progress');
-  const fill = $('#direct-audio-progress-fill');
-  const label = $('#direct-audio-progress-label');
-  if (!progress || !fill || !label) return;
-  progress.hidden = false;
-  if (total > 0) {
-    const percent = Math.min(100, Math.floor(loaded / total * 100));
-    progress.classList.remove('is-indeterminate');
-    fill.style.width = `${percent}%`;
-    progress.setAttribute('aria-valuenow', String(percent));
-    label.textContent = `Завантажено ${percent}%`;
-  } else {
-    progress.classList.add('is-indeterminate');
-    progress.removeAttribute('aria-valuenow');
-    label.textContent = `Завантажено ${(loaded / (1024 * 1024)).toFixed(1)} МБ`;
-  }
-}
-
-function resetDirectDownloadProgress() {
-  const progress = $('#direct-audio-progress');
-  const fill = $('#direct-audio-progress-fill');
-  const label = $('#direct-audio-progress-label');
-  const button = $('[data-action="download-direct-audio"]');
-  const cancel = $('[data-action="cancel-direct-audio-download"]');
-  if (progress) {
-    progress.hidden = true;
-    progress.classList.remove('is-indeterminate');
-  }
-  if (fill) fill.style.width = '0%';
-  if (label) label.textContent = '';
-  if (button) {
-    button.disabled = false;
-    button.textContent = 'Завантажити на пристрій';
-  }
-  if (cancel) cancel.hidden = true;
-}
-
-async function downloadDirectAudio() {
-  const rawUrl = $('#direct-audio-url')?.value.trim() || '';
-  const titleInput = $('#direct-audio-title')?.value.trim() || '';
-  const artistInput = $('#direct-audio-artist')?.value.trim() || '';
-  let source;
-  try { source = new URL(rawUrl); }
-  catch { return notify('Вставте повну HTTPS-посилання на аудіофайл.'); }
-  if (source.protocol !== 'https:' || !source.hostname || source.username || source.password || isYouTubeMediaHost(source.hostname)) {
-    return notify('Потрібне пряме HTTPS-посилання на аудіофайл із дозволеного джерела.');
-  }
-  if (!navigator.onLine) return notify('Для завантаження підключіться до інтернету.');
-
-  const downloadKey = `direct:${source.href}`;
-  if (activeAudioDownloads.size) return notify(activeAudioDownloads.has(downloadKey) ? 'Цей файл уже завантажується.' : 'Зачекайте завершення поточного завантаження.');
-  const controller = new AbortController();
-  directAudioDownloadController = controller;
-  activeAudioDownloads.add(downloadKey);
-  const downloadButton = $('[data-action="download-direct-audio"]');
-  const cancelButton = $('[data-action="cancel-direct-audio-download"]');
-  if (downloadButton) {
-    downloadButton.disabled = true;
-    downloadButton.textContent = 'Завантажуємо…';
-  }
-  if (cancelButton) cancelButton.hidden = false;
-  notify('⏳ Починаємо завантаження аудіофайлу…');
-
-  try {
-    const response = await fetch(source.href, {
-      method: 'GET',
-      mode: 'cors',
-      credentials: 'omit',
-      cache: 'no-store',
-      signal: controller.signal
-    });
-    if (!response.ok) throw new Error(`Джерело повернуло помилку ${response.status}.`);
-    const resolvedUrl = new URL(response.url || source.href);
-    if (resolvedUrl.protocol !== 'https:' || isYouTubeMediaHost(resolvedUrl.hostname)) {
-      throw new Error('Джерело переспрямувало на непідтримуване посилання.');
-    }
-    const format = directAudioFormat(resolvedUrl, response.headers.get('content-type'));
-    if (!format) throw new Error('За цим посиланням не знайдено підтримуваний аудіофайл.');
-
-    const expectedLength = Number(response.headers.get('content-length')) || 0;
-    if (expectedLength > MAX_DIRECT_AUDIO_BYTES) throw new Error('Файл перевищує ліміт 120 МБ.');
-    const chunks = [];
-    let loaded = 0;
-    let lastProgressAt = 0;
-    if (response.body?.getReader) {
-      const reader = response.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        loaded += value.byteLength;
-        if (loaded > MAX_DIRECT_AUDIO_BYTES) {
-          await reader.cancel();
-          throw new Error('Файл перевищує ліміт 120 МБ.');
-        }
-        chunks.push(value);
-        const now = Date.now();
-        if (now - lastProgressAt > 350) {
-          updateDirectDownloadProgress(loaded, expectedLength);
-          lastProgressAt = now;
-        }
-      }
-    } else {
-      const blob = await response.blob();
-      loaded = blob.size;
-      if (loaded > MAX_DIRECT_AUDIO_BYTES) throw new Error('Файл перевищує ліміт 120 МБ.');
-      chunks.push(blob);
-    }
-    if (!loaded) throw new Error('Джерело повернуло порожній файл.');
-
-    const audioBlob = new Blob(chunks, { type: format.type });
-    if (!audioBlob.size || audioBlob.size !== loaded) throw new Error('Завантаження завершилося некоректно. Спробуйте ще раз.');
-    updateDirectDownloadProgress(loaded, expectedLength || loaded);
-    const encodedFilename = resolvedUrl.pathname.split('/').pop() || '';
-    let urlFilename = encodedFilename;
-    try { urlFilename = decodeURIComponent(encodedFilename); } catch { /* Use the encoded filename if decoding fails. */ }
-    urlFilename = urlFilename.replace(/\.[^.]+$/, '');
-    const title = safeAudioFilename(titleInput || urlFilename || 'Аудіофайл') || 'Аудіофайл';
-    const artist = safeAudioFilename(artistInput);
-    const extension = format.extension || 'mp3';
-    const filename = safeAudioFilename(artist ? `${artist} — ${title}.${extension}` : `${title}.${extension}`);
-    const audioFile = new File([audioBlob], filename, { type: format.type });
-    const saved = await storeAudioFiles([audioFile], { notifyUser: false });
-    if (!saved) throw new Error('Не вдалося зберегти аудіо. Перевірте вільне місце на пристрої.');
-
-    const urlInput = $('#direct-audio-url');
-    if (urlInput) urlInput.value = '';
-    notify(`✅ «${title}» збережено на пристрої для офлайн-прослуховування.`);
-  } catch (error) {
-    if (error.name === 'AbortError') notify('Завантаження скасовано.');
-    else {
-      console.error('Не вдалося завантажити аудіофайл:', error);
-      const message = error instanceof TypeError
-        ? 'Джерело забороняє завантаження з цього застосунку (CORS). Використайте пряме посилання з дозволом для браузера.'
-        : error.message || 'Не вдалося завантажити аудіофайл.';
-      notify(`❌ ${message}`);
-    }
-  } finally {
-    activeAudioDownloads.delete(downloadKey);
-    if (directAudioDownloadController === controller) directAudioDownloadController = null;
-    resetDirectDownloadProgress();
-  }
-}
-
 function openYouTubePlayer(item) {
   const id = item?.id?.videoId || item?.id?.playlistId;
   if (!id || !/^[\w-]{8,80}$/.test(id)) return;
@@ -811,9 +618,10 @@ function openYouTubeResultMenu(item, kind, id) {
   const channelTitle = safeText(item.snippet?.channelTitle || item.snippet?.title || '');
   const quickActions = `<div class="youtube-menu-quick"><button class="youtube-menu-quick-action" data-action="save-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('plusCircle')}<span>${inLibrary ? 'У медіатеці' : 'Додати'}</span></button><button class="youtube-menu-quick-action" data-action="toggle-youtube-favorite" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('star', isFavorite ? 'youtube-favorite-active' : '')}<span>${isFavorite ? 'В улюблених' : 'Додати до улюблених'}</span></button><button class="youtube-menu-quick-action" data-action="share-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('share')}<span>Поширити</span></button></div>`;
   const playlistActions = `<div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="open-youtube-playlist-menu" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('playlistAdd')}<span>Додати до підбірки</span></button>${kind === 'video' ? `<button class="song-action-row youtube-menu-row" data-action="queue-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('queue')}<span>Відтворити далі</span></button><button class="song-action-row youtube-menu-row" data-action="youtube-create-station" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('station')}<span>Створити станцію</span></button>` : `<button class="song-action-row youtube-menu-row" data-action="open-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('play')}<span>Відтворити</span></button>`}</div>`;
+  const downloadPlaceholder = kind === 'video' ? `<div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="youtube-download-placeholder" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('download')}<span>Завантажити</span></button></div>` : '';
   const creatorActions = `<div class="youtube-menu-group">${kind === 'video' ? `<button class="song-action-row youtube-menu-row" data-action="youtube-search-albums" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('albumFile')}<span>Перейти до альбому</span></button>` : ''}<button class="song-action-row youtube-menu-row" data-action="youtube-open-channel" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('artist')}<span>Перейти до виконавця</span></button><button class="song-action-row youtube-menu-row" data-action="youtube-about-creator" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('info')}<span>Переглянути дані про автора</span></button></div>`;
   const feedback = `<div class="youtube-menu-group youtube-menu-group--last"><button class="song-action-row youtube-menu-row" data-action="youtube-suggest-less" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('dislike')}<span>Пропонувати менше</span></button></div>`;
-  $('#modal-root').innerHTML = `<div id="youtube-result-menu-backdrop" class="action-modal"><section class="action-sheet youtube-action-sheet" role="dialog" aria-modal="true" aria-label="Дії з результатом пошуку"><div class="action-track-head">${art}<div class="youtube-menu-copy"><strong>${title}</strong><small>${subtitle}</small></div></div>${quickActions}${playlistActions}${creatorActions}${feedback}</section></div>`;
+  $('#modal-root').innerHTML = `<div id="youtube-result-menu-backdrop" class="action-modal"><section class="action-sheet youtube-action-sheet" role="dialog" aria-modal="true" aria-label="Дії з результатом пошуку"><div class="action-track-head">${art}<div class="youtube-menu-copy"><strong>${title}</strong><small>${subtitle}</small></div></div>${quickActions}${playlistActions}${downloadPlaceholder}${creatorActions}${feedback}</section></div>`;
   $('#youtube-result-menu-backdrop').addEventListener('click', (event) => {
     if (event.target.id === 'youtube-result-menu-backdrop') closeSongMenu();
   });
@@ -928,15 +736,6 @@ function renderSettings() {
   const profile = state.googleProfile;
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><h2>Налаштування</h2><span></span></header>
     <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name || profile.email)}` : 'Войти через Google'}"><span class="profile-button profile-button--large ${profilePictureUrl(profile) ? 'profile-button--photo' : ''}">${profileAvatarContents(profile)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name || profile.email) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
-    <section class="settings-connection-card" aria-label="Завантаження аудіофайлу"><div class="settings-connection-heading"><strong>Завантажити аудіо</strong><small>Вставте пряму HTTPS-посилання на MP3 або інший аудіофайл, який дозволено завантажувати. YouTube-посилання не підтримуються.</small></div>
-      <input id="direct-audio-url" type="url" inputmode="url" autocapitalize="off" autocomplete="url" autocorrect="off" spellcheck="false" placeholder="https://example.com/song.mp3" aria-label="Пряма HTTPS-посилання на аудіофайл">
-      <input id="direct-audio-title" type="text" autocomplete="off" placeholder="Назва пісні (необов’язково)" aria-label="Назва пісні">
-      <input id="direct-audio-artist" type="text" autocomplete="off" placeholder="Виконавець (необов’язково)" aria-label="Виконавець">
-      <div id="direct-audio-progress" class="direct-audio-progress" role="progressbar" aria-label="Прогрес завантаження" aria-valuemin="0" aria-valuemax="100" hidden><span id="direct-audio-progress-fill"></span></div>
-      <small id="direct-audio-progress-label" class="direct-audio-progress-label" aria-live="polite"></small>
-      <button class="settings-connection-save" data-action="download-direct-audio">Завантажити на пристрій</button>
-      <button class="direct-audio-cancel" data-action="cancel-direct-audio-download" hidden>Скасувати завантаження</button>
-    </section>
     <a class="settings-action-card profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>`;
 }
 
@@ -1840,8 +1639,7 @@ document.addEventListener('click', async (event) => {
     case 'open-item': pushScreen({ type: 'item', kind, id }); break;
     case 'back': navigateBack(); break;
     case 'settings': pushScreen({ type: 'settings' }); break;
-    case 'download-direct-audio': await downloadDirectAudio(); break;
-    case 'cancel-direct-audio-download': directAudioDownloadController?.abort(); break;
+    case 'youtube-download-placeholder': notify('Завантаження поки не підключене.'); break;
     case 'google-account': openGoogleAccount(); break;
     case 'close-google-account': closeGoogleAccount(); break;
     case 'google-signout':
