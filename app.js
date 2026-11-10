@@ -30,7 +30,12 @@ const icons = {
   playlistAdd: '<path d="M4 6h11M4 12h11M4 18h7"/><path d="M19 3v8m-4-4h8"/>',
   queue: '<path d="M4 6h12M4 12h12M4 18h8"/><path d="m17 16 5 3-5 3z" fill="currentColor" stroke="none"/>',
   albumFile: '<rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="12" cy="12" r="4"/><path d="M12 8v8"/>',
-  trash: '<path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/>'
+  trash: '<path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/>',
+  share: '<path d="M12 15V3m-5 5 5-5 5 5"/><path d="M5 12v8a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-8"/>',
+  station: '<circle cx="12" cy="12" r="2"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.5 4.5a10.5 10.5 0 0 0 0 15M19.5 4.5a10.5 10.5 0 0 1 0 15M18 3v5m-2.5-2.5h5"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/>',
+  dislike: '<path d="M7 10V4a2 2 0 0 1 2-2h8.2a2 2 0 0 1 1.9 1.4l2.1 7a2 2 0 0 1-1.9 2.6h-5.1l.8 4.2a2.5 2.5 0 0 1-4.4 2L7 14"/><path d="M2 9h5v8H2z"/>',
+  plusCircle: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8m-4-4h8"/>'
 };
 
 const icon = (name, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true">${icons[name] || ''}</svg>`;
@@ -59,6 +64,9 @@ const state = {
   youtubeSearchError: '',
   youtubeChannelId: '',
   recentSearches: JSON.parse(localStorage.getItem('muzika-searches') || '[]'),
+  youtubeLibrary: JSON.parse(localStorage.getItem('muzika-youtube-library') || '[]'),
+  youtubeFavorites: JSON.parse(localStorage.getItem('muzika-youtube-favorites') || '[]'),
+  hiddenYouTubeResultIds: [],
   recentTrackIds: JSON.parse(localStorage.getItem('muzika-recent-tracks') || '[]'),
   favorites: JSON.parse(localStorage.getItem('muzika-favorites') || '[]'),
   pinnedSongs: JSON.parse(localStorage.getItem('muzika-pinned-songs') || '[]'),
@@ -262,6 +270,11 @@ function queueTrackNext(trackId) {
 
 async function playNextTrack() {
   const queuedId = state.queue.shift();
+  if (queuedId && typeof queuedId === 'object' && queuedId.source === 'youtube') {
+    openYouTubePlayer(queuedId.item);
+    notify('Відкрито наступне відео YouTube.');
+    return;
+  }
   const queuedTrack = queuedId && allTracks().find((track) => track.id === queuedId);
   if (queuedTrack) return playTrack(queuedTrack);
   const list = allTracks().filter((track) => track.local);
@@ -318,7 +331,7 @@ function sectionHeading(title, action = '', href = '') {
 function renderHome() {
   const recentlyPlayed = state.recentTrackIds.map((id) => allTracks().find((track) => track.id === id)).filter(Boolean);
   const recentlyAdded = [...allTracks()].reverse().slice(0, 8);
-  const favoriteCount = allTracks().filter((track) => state.favorites.includes(track.id)).length;
+  const favoriteCount = allTracks().filter((track) => state.favorites.includes(track.id)).length + state.youtubeFavorites.length;
   const favoritesSection = favoriteCount ? `${sectionHeading('Ваші підбірки')}<div class="featured-strip">
     <button class="feature-card feature-card--favorite" data-action="open-item" data-kind="playlist" data-id="favorites">
       <div class="favorite-art">${icon('star')}</div><span class="feature-kicker">Ваша медіатека</span><strong>Улюблені пісні</strong><span>${favoriteCount} ${favoriteCount === 1 ? 'пісня' : 'пісень'}</span>
@@ -345,7 +358,8 @@ function renderLibrary() {
   const added = [...allTracks()].reverse();
   return `<header class="page-header page-header--library"><h1>Медіатека</h1>${profileButtonMarkup()}</header>
     <div class="category-list">${categories}</div>
-    ${added.length ? `${sectionHeading('Недавно додані', 'Усі', 'all-albums')}<div class="song-list">${added.slice(0, 8).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : ''}`;
+    ${added.length ? `${sectionHeading('Недавно додані', 'Усі', 'all-albums')}<div class="song-list">${added.slice(0, 8).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : ''}
+    ${state.youtubeLibrary.length ? `${sectionHeading('Збережені з YouTube · онлайн')}<div class="song-list">${state.youtubeLibrary.map((item) => youtubeResultRow(item, { saved: true })).join('')}</div>` : ''}`;
 }
 
 function renderSearch() {
@@ -374,6 +388,7 @@ function cancelYouTubeSearch() {
 
 function scheduleYouTubeSearch(query, category = state.searchCategory, { immediate = false, channelId = '' } = {}) {
   const searchQuery = query.trim();
+  state.hiddenYouTubeResultIds = [];
   clearTimeout(youtubeSearchTimer);
   youtubeSearchController?.abort();
   youtubeSearchController = null;
@@ -411,9 +426,9 @@ async function fetchYouTubeSearch(query, category, channelId, requestId) {
 
   const type = category === 'artists' ? 'channel' : category === 'albums' ? 'playlist' : 'video';
   const parameters = new URLSearchParams({ part: 'snippet', q: query, type, maxResults: '20', key: YOUTUBE_API_KEY });
+  if (channelId) parameters.set('channelId', channelId);
   if (type === 'video') {
     parameters.set('videoCategoryId', '10');
-    if (channelId) parameters.set('channelId', channelId);
   }
   const controller = new AbortController();
   youtubeSearchController = controller;
@@ -444,22 +459,87 @@ async function fetchYouTubeSearch(query, category, channelId, requestId) {
   }
 }
 
-function youtubeResultRow(item) {
-  const resultKind = item.id?.videoId ? 'video' : item.id?.channelId ? 'channel' : 'playlist';
-  const id = item.id?.videoId || item.id?.channelId || item.id?.playlistId;
+function youtubeResultRow(item, { saved = false } = {}) {
+  const resultKind = item._kind || (item.id?.videoId ? 'video' : item.id?.channelId ? 'channel' : 'playlist');
+  const id = item._id || item.id?.videoId || item.id?.channelId || item.id?.playlistId;
   if (!id) return '';
   const image = item.snippet?.thumbnails?.medium?.url || item.snippet?.thumbnails?.high?.url || item.snippet?.thumbnails?.default?.url || '';
   const art = image.startsWith('https://') ? `<img class="song-art youtube-result-art ${resultKind === 'channel' ? 'youtube-result-art--round' : ''}" src="${safeText(image)}" alt="" loading="lazy">` : `<span class="song-art youtube-result-placeholder">${icon(resultKind === 'channel' ? 'artist' : resultKind === 'playlist' ? 'playlist' : 'music')}</span>`;
   const label = resultKind === 'video' ? `Пісня · ${item.snippet?.channelTitle || 'YouTube'}` : resultKind === 'channel' ? 'Виконавець · YouTube' : `Плейлист · ${item.snippet?.channelTitle || 'YouTube'}`;
-  return `<div class="song-row search-song-row youtube-result-row">${art}<button class="song-main" data-action="open-youtube-result" data-kind="${resultKind}" data-id="${safeText(id)}"><span class="song-title">${safeText(item.snippet?.title || 'Без назви')}</span><span class="song-artist">${safeText(label)}</span></button><button class="icon-button song-more" data-action="youtube-result-menu" data-kind="${resultKind}" data-id="${safeText(id)}" aria-label="Додаткові дії">${icon('more')}</button></div>`;
+  return `<div class="song-row search-song-row youtube-result-row ${saved ? 'youtube-result-row--saved' : ''}">${art}<button class="song-main" data-action="open-youtube-result" data-kind="${resultKind}" data-id="${safeText(id)}"><span class="song-title">${safeText(item.snippet?.title || 'Без назви')}</span><span class="song-artist">${safeText(label)}${saved ? ' · Онлайн' : ''}</span></button><button class="icon-button song-more" data-action="youtube-result-menu" data-kind="${resultKind}" data-id="${safeText(id)}" aria-label="Додаткові дії">${icon('more')}</button></div>`;
 }
 
 function findYouTubeResult(kind, id) {
-  return state.youtubeResults.find((item) => {
-    const itemId = item.id?.videoId || item.id?.channelId || item.id?.playlistId;
-    const itemKind = item.id?.videoId ? 'video' : item.id?.channelId ? 'channel' : 'playlist';
+  return [...state.youtubeResults, ...state.youtubeLibrary, ...state.youtubeFavorites].find((item) => {
+    const itemId = item._id || item.id?.videoId || item.id?.channelId || item.id?.playlistId;
+    const itemKind = item._kind || (item.id?.videoId ? 'video' : item.id?.channelId ? 'channel' : 'playlist');
     return itemId === id && itemKind === kind;
   });
+}
+
+function youtubeResultKey(kind, id) {
+  return `${kind}:${id}`;
+}
+
+function youtubeResultKeys(items) {
+  return items.map((item) => youtubeResultKey(item._kind || (item.id?.videoId ? 'video' : item.id?.channelId ? 'channel' : 'playlist'), item._id || item.id?.videoId || item.id?.channelId || item.id?.playlistId));
+}
+
+function saveYouTubeResult(item, kind, id) {
+  const key = youtubeResultKey(kind, id);
+  const existingIndex = youtubeResultKeys(state.youtubeLibrary).indexOf(key);
+  if (existingIndex >= 0) {
+    state.youtubeLibrary.splice(existingIndex, 1);
+    localStorage.setItem('muzika-youtube-library', JSON.stringify(state.youtubeLibrary));
+    closeSongMenu();
+    render();
+    notify('Видалено зі збережених YouTube.');
+    return;
+  }
+  if (item) state.youtubeLibrary.unshift({ ...item, _kind: kind, _id: id });
+  localStorage.setItem('muzika-youtube-library', JSON.stringify(state.youtubeLibrary));
+  closeSongMenu();
+  render();
+  notify('Збережено в медіатеці. Для відтворення потрібен інтернет.');
+}
+
+function toggleYouTubeFavorite(item, kind, id) {
+  const key = youtubeResultKey(kind, id);
+  const existingIndex = youtubeResultKeys(state.youtubeFavorites).indexOf(key);
+  if (existingIndex >= 0) state.youtubeFavorites.splice(existingIndex, 1);
+  else if (item) state.youtubeFavorites.unshift({ ...item, _kind: kind, _id: id });
+  localStorage.setItem('muzika-youtube-favorites', JSON.stringify(state.youtubeFavorites));
+  closeSongMenu();
+  render();
+  notify(existingIndex >= 0 ? 'Вилучено з улюблених.' : 'Додано до улюблених.');
+}
+
+function searchYouTubeChannel(channelId, channelTitle, category = 'top') {
+  if (!channelId) return notify('Для цього результату немає даних про канал.');
+  state.searchText = channelTitle || state.searchText;
+  state.searchCategory = category;
+  closeSongMenu();
+  if (state.screen.type !== 'tab' || state.screen.tab !== 'search') {
+    state.tab = 'search';
+    state.screenStack = [];
+    state.screen = { type: 'tab', tab: 'search' };
+  }
+  render();
+  scheduleYouTubeSearch(state.searchText, category, { immediate: true, channelId });
+}
+
+async function shareYouTubeResult(item, kind, id) {
+  const url = kind === 'playlist' ? `https://www.youtube.com/playlist?list=${encodeURIComponent(id)}` : kind === 'channel' ? `https://www.youtube.com/channel/${encodeURIComponent(id)}` : `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+  const title = item?.snippet?.title || 'YouTube';
+  try {
+    if (navigator.share) await navigator.share({ title, url });
+    else if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+      notify('Посилання скопійовано.');
+    } else notify('Не вдалося поділитися цим результатом.');
+  } catch (error) {
+    if (error.name !== 'AbortError') notify('Не вдалося поділитися цим результатом.');
+  }
 }
 
 function openYouTubePlayer(item) {
@@ -482,15 +562,41 @@ function closeYouTubePlayer() {
 }
 
 function openYouTubeResultMenu(item, kind, id) {
-  const isPlaylist = kind === 'playlist';
-  const externalUrl = isPlaylist ? `https://www.youtube.com/playlist?list=${encodeURIComponent(id)}` : kind === 'channel' ? `https://www.youtube.com/channel/${encodeURIComponent(id)}` : `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+  if (!item) return;
+  const resultKey = youtubeResultKey(kind, id);
+  const inLibrary = youtubeResultKeys(state.youtubeLibrary).includes(resultKey);
+  const isFavorite = youtubeResultKeys(state.youtubeFavorites).includes(resultKey);
   const image = item?.snippet?.thumbnails?.medium?.url || item?.snippet?.thumbnails?.default?.url || '';
   const art = image.startsWith('https://') ? `<img class="action-art ${kind === 'channel' ? 'youtube-result-art--round' : ''}" src="${safeText(image)}" alt="" loading="lazy">` : `<span class="action-art">${icon(kind === 'channel' ? 'artist' : kind === 'playlist' ? 'playlist' : 'music')}</span>`;
   const title = safeText(item?.snippet?.title || 'YouTube');
   const subtitle = safeText(item?.snippet?.channelTitle || 'Результат пошуку');
-  $('#modal-root').innerHTML = `<div id="youtube-result-menu-backdrop" class="action-modal"><section class="action-sheet" role="dialog" aria-modal="true" aria-label="Дії з результатом YouTube"><div class="action-track-head">${art}<div class="youtube-menu-copy"><strong>${title}</strong><small>${subtitle}</small></div></div>${kind === 'channel' ? `<button class="song-action-row" data-action="search-youtube-channel" data-id="${safeText(id)}">${icon('music')}<span>Знайти пісні виконавця</span></button>` : `<button class="song-action-row" data-action="open-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('play')}<span>Відтворити</span></button>`}<a class="song-action-row youtube-external-action" href="${safeText(externalUrl)}" target="_blank" rel="noopener noreferrer">${icon('next')}<span>Відкрити на YouTube</span></a></section></div>`;
+  const channelId = item.snippet?.channelId || (kind === 'channel' ? id : '');
+  const channelTitle = safeText(item.snippet?.channelTitle || item.snippet?.title || '');
+  const quickActions = `<div class="youtube-menu-quick"><button class="youtube-menu-quick-action" data-action="save-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('plusCircle')}<span>${inLibrary ? 'У медіатеці' : 'Додати'}</span></button><button class="youtube-menu-quick-action" data-action="toggle-youtube-favorite" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('star', isFavorite ? 'youtube-favorite-active' : '')}<span>${isFavorite ? 'В улюблених' : 'Додати до улюблених'}</span></button><button class="youtube-menu-quick-action" data-action="share-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('share')}<span>Поширити</span></button></div>`;
+  const playlistActions = `<div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="open-youtube-playlist-menu" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('playlistAdd')}<span>Додати до підбірки</span></button>${kind === 'video' ? `<button class="song-action-row youtube-menu-row" data-action="queue-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('queue')}<span>Відтворити далі</span></button><button class="song-action-row youtube-menu-row" data-action="youtube-create-station" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('station')}<span>Створити станцію</span></button>` : `<button class="song-action-row youtube-menu-row" data-action="open-youtube-result" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('play')}<span>Відтворити</span></button>`}</div>`;
+  const creatorActions = `<div class="youtube-menu-group">${kind === 'video' ? `<button class="song-action-row youtube-menu-row" data-action="youtube-search-albums" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('albumFile')}<span>Перейти до альбому</span></button>` : ''}<button class="song-action-row youtube-menu-row" data-action="youtube-open-channel" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('artist')}<span>Перейти до виконавця</span></button><button class="song-action-row youtube-menu-row" data-action="youtube-about-creator" data-kind="${safeText(kind)}" data-id="${safeText(id)}" data-channel="${safeText(channelId)}" data-title="${channelTitle}">${icon('info')}<span>Переглянути дані про автора</span></button></div>`;
+  const feedback = `<div class="youtube-menu-group youtube-menu-group--last"><button class="song-action-row youtube-menu-row" data-action="youtube-suggest-less" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('dislike')}<span>Пропонувати менше</span></button></div>`;
+  $('#modal-root').innerHTML = `<div id="youtube-result-menu-backdrop" class="action-modal"><section class="action-sheet youtube-action-sheet" role="dialog" aria-modal="true" aria-label="Дії з результатом пошуку"><div class="action-track-head">${art}<div class="youtube-menu-copy"><strong>${title}</strong><small>${subtitle}</small></div></div>${quickActions}${playlistActions}${creatorActions}${feedback}</section></div>`;
   $('#youtube-result-menu-backdrop').addEventListener('click', (event) => {
-    if (event.target.id === 'youtube-result-menu-backdrop') closeYouTubePlayer();
+    if (event.target.id === 'youtube-result-menu-backdrop') closeSongMenu();
+  });
+}
+
+function openYouTubePlaylistMenu(item, kind, id) {
+  const key = youtubeResultKey(kind, id);
+  const isFavorite = youtubeResultKeys(state.youtubeFavorites).includes(key);
+  const title = safeText(item?.snippet?.title || 'YouTube');
+  $('#modal-root').innerHTML = `<div id="youtube-playlist-menu-backdrop" class="action-modal"><section class="action-sheet youtube-action-sheet" role="dialog" aria-modal="true" aria-label="Додати до підбірки"><div class="action-track-head"><span class="action-art">${icon('music')}</span><div class="youtube-menu-copy"><strong>${title}</strong><small>Додати до підбірки</small></div></div><button class="song-action-row youtube-menu-row" data-action="toggle-youtube-favorite" data-kind="${safeText(kind)}" data-id="${safeText(id)}">${icon('star', isFavorite ? 'youtube-favorite-active' : '')}<span>${isFavorite ? 'Вилучити з улюблених' : 'Улюблені пісні'}</span></button></section></div>`;
+  $('#youtube-playlist-menu-backdrop').addEventListener('click', (event) => {
+    if (event.target.id === 'youtube-playlist-menu-backdrop') closeSongMenu();
+  });
+}
+
+function openYouTubeCreatorInfo(item, channelId, channelTitle) {
+  const title = safeText(channelTitle || item?.snippet?.channelTitle || item?.snippet?.title || 'Невідомий канал');
+  $('#modal-root').innerHTML = `<div id="youtube-creator-backdrop" class="action-modal"><section class="action-sheet youtube-action-sheet" role="dialog" aria-modal="true" aria-label="Дані про автора"><div class="action-track-head"><span class="action-art youtube-result-placeholder">${icon('artist')}</span><div class="youtube-menu-copy"><strong>${title}</strong><small>Канал YouTube</small></div></div><p class="youtube-creator-note">Це автор відео з глобального пошуку. Пісні відтворюються через офіційний програвач YouTube.</p>${channelId ? `<button class="song-action-row youtube-menu-row" data-action="youtube-open-channel" data-channel="${safeText(channelId)}" data-title="${title}">${icon('search')}<span>Знайти інші відео автора</span></button>` : ''}</section></div>`;
+  $('#youtube-creator-backdrop').addEventListener('click', (event) => {
+    if (event.target.id === 'youtube-creator-backdrop') closeSongMenu();
   });
 }
 
@@ -509,11 +615,16 @@ function renderSearchBody() {
   const trackRows = tracks.map((track) => `<div class="song-row search-song-row">${artMarkup(track.art, track.album, 'song-art')}<button class="song-main" data-action="play-track" data-id="${safeText(track.id)}"><span class="song-title">${safeText(track.title)}${track.explicit ? '<span class="explicit-mark">E</span>' : ''}</span><span class="song-artist">Пісня · ${safeText(track.artist)}</span></button><button class="icon-button song-more" data-action="song-menu" data-id="${safeText(track.id)}" aria-label="Додаткові дії">${icon('more')}</button></div>`).join('');
   const albumRows = albums.map((album) => `<button class="search-result-entity" data-action="open-item" data-kind="album" data-id="${safeText(album.id)}">${artMarkup(album.art, album.title, 'search-result-art')}<span class="search-result-copy"><strong>${safeText(album.title)}</strong><small>Альбом · ${safeText(album.artist)}</small></span>${icon('back', 'chevron')}</button>`).join('');
   const hasRemoteResults = state.youtubeSearchQuery === query && state.youtubeSearchCategory === state.searchCategory;
+  const visibleYouTubeResults = state.youtubeResults.filter((item) => {
+    const kind = item.id?.videoId ? 'video' : item.id?.channelId ? 'channel' : 'playlist';
+    const id = item.id?.videoId || item.id?.channelId || item.id?.playlistId;
+    return !state.hiddenYouTubeResultIds.includes(youtubeResultKey(kind, id));
+  });
   const remoteStatus = hasRemoteResults && state.youtubeSearchStatus === 'loading' ? '<div class="search-loading"><span></span>Пошук YouTube…</div>'
     : hasRemoteResults && state.youtubeSearchStatus === 'offline' ? '<div class="empty-state">Немає інтернету. Показано результати з медіатеки пристрою.</div>'
       : hasRemoteResults && state.youtubeSearchStatus === 'error' ? `<div class="empty-state">${safeText(state.youtubeSearchError)}</div>`
-        : hasRemoteResults && state.youtubeSearchStatus === 'ready' && !state.youtubeResults.length ? '<div class="empty-state">У YouTube нічого не знайдено.</div>' : '';
-  const remoteRows = hasRemoteResults && state.youtubeSearchStatus === 'ready' ? state.youtubeResults.map(youtubeResultRow).join('') : '';
+        : hasRemoteResults && state.youtubeSearchStatus === 'ready' && !visibleYouTubeResults.length ? `<div class="empty-state">${state.youtubeResults.length ? 'Інші результати YouTube приховано.' : 'У YouTube нічого не знайдено.'}</div>` : '';
+  const remoteRows = hasRemoteResults && state.youtubeSearchStatus === 'ready' ? visibleYouTubeResults.map(youtubeResultRow).join('') : '';
   const localResults = state.searchCategory === 'artists' ? artistRows || '<div class="empty-state">Виконавців у медіатеці пристрою немає.</div>'
     : state.searchCategory === 'albums' ? albumRows || '<div class="empty-state">Альбомів у медіатеці пристрою немає.</div>'
       : `${artistRows}${trackRows}${albumRows}${artistRows || trackRows || albumRows ? '' : '<div class="empty-state">Збігів у медіатеці пристрою немає.</div>'}`;
@@ -530,12 +641,14 @@ function renderItemScreen() {
   else if (kind === 'album') list = allTracks().filter((track) => track.album === id);
   else if (id === 'favorites') list = allTracks().filter((track) => state.favorites.includes(track.id));
   else if (id === 'recent') list = state.recentTrackIds.map((trackId) => allTracks().find((track) => track.id === trackId)).filter(Boolean);
+  const youtubeFavorites = id === 'favorites' ? state.youtubeFavorites : [];
   list = prioritizePinned(list);
+  const itemCount = list.length + youtubeFavorites.length;
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><span></span></header>
     <section class="detail-heading">${kind === 'artist' ? artMarkup(item.art, item.title, 'detail-art detail-art--artist') : ''}<h1>${safeText(heading)}</h1>${kind !== 'artist' ? `<p>${safeText(item.artist || 'Ваша медіатека')}</p>` : ''}</section>
-    ${list.length ? `<div class="detail-actions"><button data-action="play-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('play')} Відтворити</button><button data-action="shuffle-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('shuffle')} Тасувати</button></div>` : ''}
+    ${itemCount ? `<div class="detail-actions"><button data-action="play-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('play')} Відтворити</button><button data-action="shuffle-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('shuffle')} Тасувати</button></div>` : ''}
     ${kind === 'artist' ? `<h2 class="letter-heading">Популярні пісні</h2>` : `<h2 class="letter-heading">${kind === 'playlist' ? 'Пісні' : 'A'}</h2>`}
-    <div class="song-list song-list--detail">${list.map((track, i) => songRow(track, i, { showAlbum: false })).join('') || '<div class="empty-state">Тут поки немає пісень. Додайте власні аудіофайли, щоб слухати їх офлайн.</div>'}</div>`;
+    <div class="song-list song-list--detail">${list.map((track, i) => songRow(track, i, { showAlbum: false })).join('')}${youtubeFavorites.map((item) => youtubeResultRow(item, { saved: true })).join('') || (!list.length ? '<div class="empty-state">Тут поки немає пісень. Додайте власні аудіофайли, щоб слухати їх офлайн.</div>' : '')}</div>`;
 }
 
 function renderCategory() {
@@ -1421,6 +1534,10 @@ document.addEventListener('click', async (event) => {
       else if (id === 'favorites') list = allTracks().filter((track) => state.favorites.includes(track.id));
       else if (id === 'recent') list = state.recentTrackIds.map((trackId) => allTracks().find((track) => track.id === trackId)).filter(Boolean);
       else list = allTracks();
+      if (!list.length && id === 'favorites' && state.youtubeFavorites.length) {
+        openYouTubePlayer(state.youtubeFavorites[0]);
+        break;
+      }
       await playTrack(list.find((track) => track.local));
       break;
     }
@@ -1430,6 +1547,10 @@ document.addEventListener('click', async (event) => {
       if (button.dataset.kind === 'album') list = list.filter((track) => track.album === id);
       if (id === 'favorites') list = list.filter((track) => state.favorites.includes(track.id));
       if (id === 'recent') list = state.recentTrackIds.map((trackId) => allTracks().find((track) => track.id === trackId)).filter(Boolean);
+      if (!list.length && id === 'favorites' && state.youtubeFavorites.length) {
+        openYouTubePlayer(state.youtubeFavorites[Math.floor(Math.random() * state.youtubeFavorites.length)]);
+        break;
+      }
       const shuffled = list[Math.floor(Math.random() * list.length)];
       await playTrack(shuffled);
       break;
@@ -1465,6 +1586,45 @@ document.addEventListener('click', async (event) => {
       break;
     }
     case 'youtube-result-menu': openYouTubeResultMenu(findYouTubeResult(kind, id), kind, id); break;
+    case 'save-youtube-result': saveYouTubeResult(findYouTubeResult(kind, id), kind, id); break;
+    case 'toggle-youtube-favorite': toggleYouTubeFavorite(findYouTubeResult(kind, id), kind, id); break;
+    case 'share-youtube-result': await shareYouTubeResult(findYouTubeResult(kind, id), kind, id); break;
+    case 'open-youtube-playlist-menu': openYouTubePlaylistMenu(findYouTubeResult(kind, id), kind, id); break;
+    case 'queue-youtube-result': {
+      const item = findYouTubeResult(kind, id);
+      if (!item) break;
+      state.queue = [{ source: 'youtube', kind, id, item }, ...state.queue.filter((entry) => !(entry && typeof entry === 'object' && entry.source === 'youtube' && entry.kind === kind && entry.id === id))];
+      closeSongMenu();
+      notify('Відео додано в чергу. Воно відкриється після натискання «Далі».');
+      break;
+    }
+    case 'youtube-create-station':
+    case 'youtube-open-channel': {
+      const channelId = button.dataset.channel || (kind === 'channel' ? id : '');
+      const item = findYouTubeResult(kind, id);
+      searchYouTubeChannel(channelId, button.dataset.title || item?.snippet?.channelTitle || item?.snippet?.title, 'top');
+      break;
+    }
+    case 'youtube-search-albums': {
+      const channelId = button.dataset.channel || '';
+      const item = findYouTubeResult(kind, id);
+      searchYouTubeChannel(channelId, button.dataset.title || item?.snippet?.channelTitle || item?.snippet?.title, 'albums');
+      break;
+    }
+    case 'youtube-about-creator': {
+      const item = findYouTubeResult(kind, id);
+      const channelId = button.dataset.channel || (kind === 'channel' ? id : '');
+      openYouTubeCreatorInfo(item, channelId, button.dataset.title || item?.snippet?.channelTitle || item?.snippet?.title);
+      break;
+    }
+    case 'youtube-suggest-less': {
+      const key = youtubeResultKey(kind, id);
+      if (!state.hiddenYouTubeResultIds.includes(key)) state.hiddenYouTubeResultIds.push(key);
+      closeSongMenu();
+      refreshSearchResults();
+      notify('Результат приховано з цього пошуку.');
+      break;
+    }
     case 'search-youtube-channel': {
       const item = findYouTubeResult('channel', id);
       if (!item) break;

@@ -208,6 +208,16 @@ button { border: 0; cursor: pointer; }
 .youtube-menu-copy strong { font-size: 17px; font-weight: 500; }
 .youtube-menu-copy small { color: var(--muted); font-size: 14px; }
 .youtube-external-action { color: var(--blue); text-decoration: none; }
+.youtube-action-sheet { width: min(76vw, 460px); padding: 13px 18px 10px; }
+.youtube-menu-quick { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; padding: 11px 0 14px; border-bottom: 1px solid #444448; }
+.youtube-menu-quick-action { min-width: 0; min-height: 66px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 7px; padding: 2px 3px; background: transparent; color: #f5f5f7; font-size: 13px; line-height: 1.2; text-align: center; }
+.youtube-menu-quick-action .icon { width: 25px; height: 25px; flex: 0 0 25px; }
+.youtube-menu-quick-action span { max-width: 100%; }
+.youtube-favorite-active { fill: #ffd60a; color: #ffd60a; }
+.youtube-menu-group { padding: 5px 0; border-bottom: 1px solid #444448; }
+.youtube-menu-group--last { border-bottom: 0; }
+.song-action-row.youtube-menu-row { min-height: 58px; padding: 10px 4px; border: 0; font-size: 17px; }
+.youtube-creator-note { margin: 14px 4px; color: #b7b7bd; font-size: 14px; line-height: 1.45; }
 .youtube-player-backdrop { justify-content: center; padding: 16px; }
 .youtube-player-sheet { position: relative; width: 100%; max-width: 640px; padding: 58px 16px 18px; border: 1px solid #444448; border-radius: 25px; background: #1c1c1e; box-shadow: 0 18px 55px #000b; }
 .youtube-embed { overflow: hidden; width: 100%; aspect-ratio: 16 / 9; border-radius: 12px; background: #000; }
