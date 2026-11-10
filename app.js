@@ -36,45 +36,6 @@ const icons = {
 
 const icon = (name, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true">${icons[name] || ''}</svg>`;
 
-const albums = [
-  { id: 'armiya', title: 'А.Р.М.И.Я', artist: 'А.Р.М.И.Я', art: 'mono', kind: 'album' },
-  { id: 'astudio', title: 'Улетаю', artist: "A'Студио", art: 'silver', kind: 'album' },
-  { id: 'sky', title: 'Небо в клетку', artist: 'Алексей Марковников', art: 'blue', kind: 'album' },
-  { id: 'angels', title: 'А мы не ангелы, парень', artist: 'Алексей Пономарёв', art: 'paper', kind: 'album' },
-  { id: 'date', title: 'Первое свидание', artist: 'алёна швец.', art: 'rose', kind: 'album' },
-  { id: 'dream', title: 'Зимний сон', artist: 'Алсу', art: 'gold', kind: 'album' },
-  { id: 'respect', title: 'Там', artist: 'Антиреспект', art: 'night', kind: 'album' },
-  { id: 'kiss', title: 'Kiss You', artist: 'Serebro', art: 'coast', kind: 'album' },
-  { id: 'dolls', title: 'Магазин игрушек для взрослых', artist: 'Кис-кис', art: 'comic', kind: 'album' },
-  { id: 'angel-single', title: 'ангел-хранитель — Single', artist: 'я про рок', art: 'halo', kind: 'album' },
-  { id: 'everyday', title: 'Every Single Day', artist: 'Benny Benassi & Matt Sassari', art: 'concert', kind: 'album' }
-];
-
-const tracks = [
-  { id: 't1', title: 'Вызываю на бой', artist: 'А.Р.М.И.Я', album: 'А.Р.М.И.Я', art: 'mono', favorite: true },
-  { id: 't2', title: 'Улетаю', artist: "A'Студио", album: 'Улетаю', art: 'silver' },
-  { id: 't3', title: '2000 баксов', artist: 'Алексей Марковников', album: 'Небо в клетку', art: 'blue' },
-  { id: 't4', title: 'А мы не ангелы, парень', artist: 'Алексей Пономарёв', album: 'А мы не ангелы, парень', art: 'paper' },
-  { id: 't5', title: 'Первое свидание', artist: 'алёна швец.', album: 'Первое свидание', art: 'rose' },
-  { id: 't6', title: 'Зимний сон', artist: 'Алсу', album: 'Зимний сон', art: 'gold' },
-  { id: 't7', title: 'Ні я не ту кохав', artist: 'Анатолій Говорадло', album: 'Найкраще', art: 'portrait' },
-  { id: 't8', title: 'Там', artist: 'Антиреспект', album: 'Там', art: 'night', favorite: true },
-  { id: 't9', title: 'Kiss You', artist: 'Serebro', album: 'Kiss You', art: 'coast' },
-  { id: 't10', title: 'Без любви', artist: 'Serebro', album: 'Без любви', art: 'violet' },
-  { id: 't11', title: 'Почему же', artist: 'DJ Дождик', album: 'The Best', art: 'cassette' },
-  { id: 't12', title: 'Та4то', artist: 'Бумбокс', album: 'III', art: 'minimal' },
-  { id: 't13', title: 'ангел-хранитель', artist: 'я про рок', album: 'ангел-хранитель — Single', art: 'halo' },
-  { id: 't14', title: 'Every Single Day', artist: 'Benny Benassi & Matt Sassari', album: 'Every Single Day', art: 'concert' }
-];
-
-const artists = [...new Map(tracks.map((track) => [track.artist, {
-  id: track.artist,
-  title: track.artist,
-  album: track.album,
-  art: track.art,
-  kind: 'artist'
-}])).values()];
-
 const categoryInfo = {
   playlists: ['Підбірки', 'playlist'],
   artists: ['Виконавці', 'artist'],
@@ -91,17 +52,16 @@ const state = {
   screen: { type: 'tab', tab: 'home' },
   screenStack: [],
   searchText: '',
-  searchScope: 'catalog',
   recentSearches: JSON.parse(localStorage.getItem('muzika-searches') || '[]'),
-  favorites: JSON.parse(localStorage.getItem('muzika-favorites') || '["t1","t8"]'),
+  recentTrackIds: JSON.parse(localStorage.getItem('muzika-recent-tracks') || '[]'),
+  favorites: JSON.parse(localStorage.getItem('muzika-favorites') || '[]'),
   pinnedSongs: JSON.parse(localStorage.getItem('muzika-pinned-songs') || '[]'),
-  hiddenTracks: JSON.parse(localStorage.getItem('muzika-hidden-tracks') || '[]'),
   queue: [],
   googleProfile: (() => {
     try { return JSON.parse(localStorage.getItem('muzika-google-profile') || 'null'); } catch { return null; }
   })(),
   localTracks: [],
-  currentTrackId: 't2',
+  currentTrackId: '',
   isPlaying: false,
   toastTimer: null
 };
@@ -164,16 +124,29 @@ function profileButtonMarkup() {
 }
 
 function artMarkup(art, label, extra = '') {
-  const readable = safeText(label || '♫');
-  return `<div class="artwork artwork--${safeText(art || 'local')} ${extra}" aria-label="${readable}"><span class="artwork-mark">${art === 'mono' ? 'A.R.M.' : art === 'silver' ? 'A’STUDIO' : art === 'night' ? 'TAM' : art === 'halo' ? '◌' : art === 'coast' ? 'KISS' : '♫'}</span><span class="artwork-title">${readable}</span><span class="artwork-glow"></span></div>`;
+  return `<div class="artwork artwork--local ${extra}" aria-hidden="true">${icon('music', 'artwork-music')}</div>`;
 }
 
 function currentTrack() {
-  return allTracks().find((track) => track.id === state.currentTrackId) || allTracks().find((track) => track.local) || allTracks()[0] || { id: '', title: 'Моя медіатека', artist: '', album: '', art: 'local' };
+  return allTracks().find((track) => track.id === state.currentTrackId) || allTracks()[0] || null;
 }
 
 function allTracks() {
-  return [...tracks.filter((track) => !state.hiddenTracks.includes(track.id)), ...state.localTracks];
+  return state.localTracks;
+}
+
+function libraryAlbums() {
+  return [...new Map(allTracks().map((track) => [track.album || 'Додані аудіофайли', {
+    id: track.album || 'Додані аудіофайли', title: track.album || 'Додані аудіофайли',
+    artist: track.artist || 'Невідомий виконавець', art: 'local', kind: 'album'
+  }])).values()];
+}
+
+function libraryArtists() {
+  return [...new Map(allTracks().map((track) => [track.artist || 'Невідомий виконавець', {
+    id: track.artist || 'Невідомий виконавець', title: track.artist || 'Невідомий виконавець',
+    art: 'local', kind: 'artist'
+  }])).values()];
 }
 
 function musicLetter(value = '') {
@@ -196,10 +169,6 @@ function sortTracksByArtist(list) {
 
 function prioritizePinned(list) {
   return [...list].sort((a, b) => Number(state.pinnedSongs.includes(b.id)) - Number(state.pinnedSongs.includes(a.id)));
-}
-
-function albumCards(items, compact = false) {
-  return `<div class="album-strip${compact ? ' album-strip--compact' : ''}">${items.map((item) => `<button class="album-card" data-action="open-item" data-kind="${item.kind}" data-id="${safeText(item.id)}">${artMarkup(item.art, item.title)}<span class="album-title">${safeText(item.title)}</span><span class="album-subtitle">${safeText(item.artist)}</span></button>`).join('')}</div>`;
 }
 
 function songRow(track, index, options = {}) {
@@ -291,7 +260,7 @@ async function playNextTrack() {
 }
 
 async function playPreviousTrack() {
-  if (currentTrack().local && audio.currentTime > 3) {
+  if (currentTrack()?.local && audio.currentTime > 3) {
     audio.currentTime = 0;
     syncNowPlayingPlayback();
     return;
@@ -306,18 +275,15 @@ async function deleteTrackFromLibrary(trackId) {
   const track = allTracks().find((item) => item.id === trackId);
   if (!track) return closeSongMenu();
   try {
-    if (track.local) {
-      await database.remove(trackId);
-      state.localTracks = state.localTracks.filter((item) => item.id !== trackId);
-    } else {
-      state.hiddenTracks = [...state.hiddenTracks, trackId];
-      localStorage.setItem('muzika-hidden-tracks', JSON.stringify(state.hiddenTracks));
-    }
+    await database.remove(trackId);
+    state.localTracks = state.localTracks.filter((item) => item.id !== trackId);
     state.favorites = state.favorites.filter((id) => id !== trackId);
     state.pinnedSongs = state.pinnedSongs.filter((id) => id !== trackId);
+    state.recentTrackIds = state.recentTrackIds.filter((id) => id !== trackId);
     state.queue = state.queue.filter((id) => id !== trackId);
     localStorage.setItem('muzika-favorites', JSON.stringify(state.favorites));
     localStorage.setItem('muzika-pinned-songs', JSON.stringify(state.pinnedSongs));
+    localStorage.setItem('muzika-recent-tracks', JSON.stringify(state.recentTrackIds));
     if (state.currentTrackId === trackId) {
       audio.pause();
       audio.removeAttribute('src');
@@ -339,77 +305,66 @@ function sectionHeading(title, action = '', href = '') {
 }
 
 function renderHome() {
-  const recently = [albums[7], albums[8], albums[0], albums[3], albums[4]];
+  const recentlyPlayed = state.recentTrackIds.map((id) => allTracks().find((track) => track.id === id)).filter(Boolean);
+  const recentlyAdded = [...allTracks()].reverse().slice(0, 8);
+  const favoriteCount = allTracks().filter((track) => state.favorites.includes(track.id)).length;
+  const favoritesSection = favoriteCount ? `${sectionHeading('Ваші підбірки')}<div class="featured-strip">
+    <button class="feature-card feature-card--favorite" data-action="open-item" data-kind="playlist" data-id="favorites">
+      <div class="favorite-art">${icon('star')}</div><span class="feature-kicker">Ваша медіатека</span><strong>Улюблені пісні</strong><span>${favoriteCount} ${favoriteCount === 1 ? 'пісня' : 'пісень'}</span>
+    </button>
+  </div>` : '';
+  const recentSection = recentlyPlayed.length ? `${sectionHeading('Недавно прослухані', 'Усі', 'recent')}<div class="song-list">${recentlyPlayed.slice(0, 5).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : '';
+  const librarySection = recentlyAdded.length ? `${sectionHeading('Недавно додані')}<div class="song-list">${recentlyAdded.map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : `<div class="empty-state empty-state--home">${icon('music')}<strong>Ваша медіатека порожня</strong><span>Додайте аудіофайли з пристрою або Google Диска — вони збережуться для офлайн-прослуховування.</span><button class="empty-state-action" data-action="import">Додати аудіофайли</button></div>`;
   return `<header class="page-header page-header--home"><h1>Домівка</h1>${profileButtonMarkup()}</header>
-    ${sectionHeading('Найпопулярніше для вас')}
-    <div class="featured-strip">
-      <button class="feature-card feature-card--favorite" data-action="open-item" data-kind="playlist" data-id="favorites">
-        <div class="favorite-art">${icon('star')}</div><span class="feature-kicker">Створено вами</span><strong>Улюблені пісні</strong><span>Усі пісні, що стали вашими улюбленими</span>
-      </button>
-    </div>
-    ${sectionHeading('Недавно прослухані', 'Усі', 'recent')}
-    ${albumCards(recently)}
-    ${sectionHeading('Пісні, які можуть сподобатися')}
-    <div class="song-list">${[tracks[8], tracks[10], tracks[4]].filter((track) => !state.hiddenTracks.includes(track.id)).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>
-    <div class="offline-note">${icon('download')}<span>Медіатека доступна офлайн</span></div>`;
+    ${favoritesSection}${recentSection}${librarySection}`;
 }
 
 function renderNew() {
   return `<header class="page-header"><h1>Новинки</h1>${profileButtonMarkup()}</header>
-    ${sectionHeading('Найкраще за 2026 рік', '›', 'all-albums')}${albumCards([albums[10], albums[4], albums[8], albums[1]])}
-    ${sectionHeading('Нещодавно додані')}${albumCards([albums[1], albums[7], albums[9], albums[2]])}`;
+    <div class="empty-state">Онлайн-каталог новинок не підключено.</div>`;
 }
 
 function renderRadio() {
-  const stations = [
-    ['ONE', 'Станція одного'], ['HITS', 'Головні хіти'], ['COUNTRY', 'Кантрі'],
-    ['MÚSICA', 'Музика світу'], ['club', 'Клубна'], ['Chill', 'Для відпочинку']
-  ];
   return `<header class="page-header"><h1>Радіо</h1>${profileButtonMarkup()}</header>
-    <div class="station-grid">${stations.map(([word, title], index) => `<button class="station-card station-card--${index}" data-action="station" data-title="${title}"><span>${word}</span><small>♫ radio</small></button>`).join('')}</div>
-    ${sectionHeading('Наживо')}
-    <button class="live-card" data-action="station" data-title="Музика наживо"><div class="live-art">${artMarkup('blue', 'LIVE')}</div><div class="live-copy"><span>ЗАРАЗ В ЕФІРІ</span><strong>Музика без пауз</strong><small>Слухайте збережені треки навіть без мережі</small></div></button>
-    ${sectionHeading('Ваші станції')}${albumCards([albums[4], albums[0]])}`;
+    <div class="empty-state">Радіостанції поки недоступні.</div>`;
 }
 
 function renderLibrary() {
   const categories = Object.entries(categoryInfo).map(([key, [title, iconName]]) => `<button class="category-row" data-action="category" data-category="${key}">${icon(iconName)}<span>${title}</span>${icon('back', 'chevron')}</button>`).join('');
+  const added = [...allTracks()].reverse();
   return `<header class="page-header page-header--library"><h1>Медіатека</h1>${profileButtonMarkup()}</header>
     <div class="category-list">${categories}</div>
-    ${sectionHeading('Недавно додані', 'Усі', 'all-albums')}${albumCards([albums[10], albums[9], albums[7], albums[8]])}
+    ${added.length ? `${sectionHeading('Недавно додані', 'Усі', 'all-albums')}<div class="song-list">${added.slice(0, 8).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : ''}
     <div class="library-footnote">${icon('download')}<span>Додайте свої аудіофайли — вони збережуться на цьому пристрої.</span><button data-action="import">Додати</button></div>`;
 }
 
 function renderSearch() {
   return `<header class="search-header"><label class="search-box">${icon('search')}<input id="search-input" type="search" placeholder="Виконавці, пісні, альбоми" value="${safeText(state.searchText)}" autocomplete="off">${icon('mic')}</label><button class="search-close" data-action="close-search" aria-label="Закрити">${icon('close')}</button></header>
-    <div class="search-scope"><button data-action="search-scope" data-scope="catalog" class="${state.searchScope === 'catalog' ? 'active' : ''}">Каталог</button><button data-action="search-scope" data-scope="library" class="${state.searchScope === 'library' ? 'active' : ''}">Медіатека</button></div>
     <div id="search-body">${renderSearchBody()}</div>`;
 }
 
 function renderSearchBody() {
   const matches = state.searchText.trim() ? allTracks().filter((track) => `${track.title} ${track.artist} ${track.album}`.toLowerCase().includes(state.searchText.toLowerCase())) : [];
-  const local = state.searchScope === 'library' ? matches.filter((track) => track.local) : matches;
   return state.searchText.trim()
-    ? `<div class="search-results-label">${local.length ? 'Результати' : 'Нічого не знайдено'}</div><div class="song-list">${prioritizePinned(local).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>`
+    ? `<div class="search-results-label">${matches.length ? 'Результати' : 'Нічого не знайдено'}</div><div class="song-list">${prioritizePinned(matches).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>`
     : `<div class="section-heading"><h2>Недавні пошуки</h2><button class="text-action text-action--red" data-action="clear-search">Очистити</button></div>
-      <div class="recent-searches">${(state.recentSearches.length ? state.recentSearches : ['Улетаю', 'Улюблені пісні', 'Алсу']).map((term) => `<button data-action="recent-search" data-term="${safeText(term)}">${icon('search')}<span>${safeText(term)}</span>${icon('more')}</button>`).join('')}</div>`;
+      <div class="recent-searches">${state.recentSearches.map((term) => `<button data-action="recent-search" data-term="${safeText(term)}">${icon('search')}<span>${safeText(term)}</span>${icon('more')}</button>`).join('') || '<div class="empty-state">Ваші пошуки з’являться тут.</div>'}</div>`;
 }
 
 function renderItemScreen() {
   const { kind, id } = state.screen;
   const albumTrack = kind === 'album' ? allTracks().find((track) => track.album === id) : null;
-  const item = [...albums, ...artists].find((value) => value.id === id) || { id, title: id === 'favorites' ? 'Улюблені пісні' : id === 'recent' ? 'Недавно прослухані' : kind === 'album' ? id : 'Музика', artist: albumTrack?.artist || 'Ваша медіатека', art: id === 'favorites' ? 'favorite' : 'neon' };
+  const item = [...libraryAlbums(), ...libraryArtists()].find((value) => value.id === id) || { id, title: id === 'favorites' ? 'Улюблені пісні' : id === 'recent' ? 'Недавно прослухані' : kind === 'album' ? id : 'Медіатека', artist: albumTrack?.artist || 'Ваша медіатека', art: 'local' };
   let heading = item.title;
   let list = [];
   if (kind === 'artist') list = allTracks().filter((track) => track.artist === id);
-  else if (kind === 'album') list = allTracks().filter((track) => track.album === item.title || track.artist === item.artist);
+  else if (kind === 'album') list = allTracks().filter((track) => track.album === id);
   else if (id === 'favorites') list = allTracks().filter((track) => state.favorites.includes(track.id));
-  else if (id === 'recent') list = [tracks[1], tracks[8], tracks[10], tracks[4]];
-  else list = tracks.slice(0, 6);
-  list = prioritizePinned(list.filter((track) => !state.hiddenTracks.includes(track.id)));
-  return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><button class="header-pill" data-action="song-menu" data-id="${safeText(id)}">${icon('menu')}<span class="pill-divider"></span>${icon('more')}</button></header>
+  else if (id === 'recent') list = state.recentTrackIds.map((trackId) => allTracks().find((track) => track.id === trackId)).filter(Boolean);
+  list = prioritizePinned(list);
+  return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><span></span></header>
     <section class="detail-heading">${kind === 'artist' ? artMarkup(item.art, item.title, 'detail-art detail-art--artist') : ''}<h1>${safeText(heading)}</h1>${kind !== 'artist' ? `<p>${safeText(item.artist || 'Ваша медіатека')}</p>` : ''}</section>
-    <div class="detail-actions"><button data-action="play-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('play')} Відтворити</button><button data-action="shuffle-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('shuffle')} Тасувати</button></div>
+    ${list.length ? `<div class="detail-actions"><button data-action="play-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('play')} Відтворити</button><button data-action="shuffle-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('shuffle')} Тасувати</button></div>` : ''}
     ${kind === 'artist' ? `<h2 class="letter-heading">Популярні пісні</h2>` : `<h2 class="letter-heading">${kind === 'playlist' ? 'Пісні' : 'A'}</h2>`}
     <div class="song-list song-list--detail">${list.map((track, i) => songRow(track, i, { showAlbum: false })).join('') || '<div class="empty-state">Тут поки немає пісень. Додайте власні аудіофайли, щоб слухати їх офлайн.</div>'}</div>`;
 }
@@ -419,12 +374,13 @@ function renderCategory() {
   const [title, iconName] = categoryInfo[category] || ['Медіатека', 'music'];
   let rows = '';
   if (category === 'playlists') {
-    rows = `<button class="entity-row" data-action="open-item" data-kind="playlist" data-id="favorites">${artMarkup('favorite', 'Улюблені пісні', 'entity-art')}<span>Улюблені пісні</span>${icon('back', 'chevron')}</button>`;
+    rows = `<button class="entity-row" data-action="open-item" data-kind="playlist" data-id="favorites"><span class="favorite-art entity-art">${icon('star')}</span><span>Улюблені пісні</span>${icon('back', 'chevron')}</button>`;
   } else if (category === 'artists') {
-    const sorted = [...artists].sort((a, b) => a.title.localeCompare(b.title, 'uk'));
-    rows = `<div class="alphabet" aria-hidden="true">${'АБВГДЕЄЖЗИІКЛМНОПРСТУФХЦЧШЩЬЮЯ#'.split('').map((char) => `<span>${char}</span>`).join('')}</div>${sorted.map((artist) => `<button class="entity-row" data-action="open-item" data-kind="artist" data-id="${safeText(artist.id)}">${artMarkup(artist.art, artist.title, 'entity-art entity-art--round')}<span>${safeText(artist.title)}</span>${icon('back', 'chevron')}</button>`).join('')}`;
+    const sorted = libraryArtists().sort((a, b) => a.title.localeCompare(b.title, 'uk'));
+    rows = sorted.length ? `<div class="alphabet" aria-hidden="true">${'АБВГДЕЄЖЗИІКЛМНОПРСТУФХЦЧШЩЬЮЯ#'.split('').map((char) => `<span>${char}</span>`).join('')}</div>${sorted.map((artist) => `<button class="entity-row" data-action="open-item" data-kind="artist" data-id="${safeText(artist.id)}">${artMarkup(artist.art, artist.title, 'entity-art entity-art--round')}<span>${safeText(artist.title)}</span>${icon('back', 'chevron')}</button>`).join('')}` : '<div class="empty-state">Тут з’являться виконавці з ваших аудіофайлів.</div>';
   } else if (category === 'albums') {
-    rows = `<div class="album-grid">${albums.slice(0, 10).map((album) => `<button class="album-card" data-action="open-item" data-kind="album" data-id="${safeText(album.id)}">${artMarkup(album.art, album.title)}<span class="album-title">${safeText(album.title)}</span><span class="album-subtitle">${safeText(album.artist)}</span></button>`).join('')}</div>`;
+    const albums = libraryAlbums();
+    rows = albums.length ? `<div class="album-grid">${albums.map((album) => `<button class="album-card" data-action="open-item" data-kind="album" data-id="${safeText(album.id)}">${artMarkup(album.art, album.title)}<span class="album-title">${safeText(album.title)}</span><span class="album-subtitle">${safeText(album.artist)}</span></button>`).join('')}</div>` : '<div class="empty-state">Тут з’являться альбоми з ваших аудіофайлів.</div>';
   } else if (category === 'songs') {
     const list = sortTracksByArtist(allTracks());
     const groups = [];
@@ -437,23 +393,22 @@ function renderCategory() {
       }
       group.tracks.push({ track, index });
     });
-    const alphabetIndex = `<nav class="alphabet alphabet--interactive" aria-label="Алфавітний покажчик">${musicAlphabet.map((letter) => `<button data-action="jump-letter" data-letter="${letter}" aria-label="Літера ${letter}">${letter}</button>`).join('')}</nav>`;
-    rows = `${alphabetIndex}${groups.map((group) => `<section class="song-letter-group" data-letter-group="${group.letter}"><h2 class="letter-heading">${group.letter}</h2><div class="song-list">${group.tracks.map(({ track, index }) => songRow(track, index, { leadingFavorite: true, hidePinned: true })).join('')}</div></section>`).join('')}`;
+    const alphabetIndex = groups.length ? `<nav class="alphabet alphabet--interactive" aria-label="Алфавітний покажчик">${musicAlphabet.map((letter) => `<button data-action="jump-letter" data-letter="${letter}" aria-label="Літера ${letter}">${letter}</button>`).join('')}</nav>` : '';
+    rows = groups.length ? `${alphabetIndex}${groups.map((group) => `<section class="song-letter-group" data-letter-group="${group.letter}"><h2 class="letter-heading">${group.letter}</h2><div class="song-list">${group.tracks.map(({ track, index }) => songRow(track, index, { leadingFavorite: true, hidePinned: true })).join('')}</div></section>`).join('')}` : '<div class="empty-state">Додайте аудіофайли, щоб слухати їх офлайн.</div>';
   } else {
     const list = prioritizePinned(allTracks().filter((track) => track.local));
     rows = `<div class="song-list">${list.length ? list.map((track, i) => songRow(track, i, { showAlbum: category === 'downloaded' })).join('') : `<div class="empty-state">${category === 'downloaded' ? 'Тут з’явиться ваша музика, додана на пристрої.' : 'Додайте аудіофайли, щоб бачити свою медіатеку тут.'}</div>`}</div>`;
   }
-  return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button>${category === 'songs' || category === 'albums' ? `<button class="header-pill" data-action="song-menu" data-id="${category}">${icon('menu')}<span class="pill-divider"></span>${icon('more')}</button>` : ''}</header>
-    <h1 class="category-title">${title}</h1>${category === 'songs' || category === 'albums' ? `<div class="detail-actions"><button data-action="play-list" data-category="${category}">${icon('play')} Відтворити</button><button data-action="shuffle-list" data-category="${category}">${icon('shuffle')} Тасувати</button></div>` : ''}
+  const hasAudio = allTracks().length > 0;
+  return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><span></span></header>
+    <h1 class="category-title">${title}</h1>${(category === 'songs' || category === 'albums') && hasAudio ? `<div class="detail-actions"><button data-action="play-list" data-category="${category}">${icon('play')} Відтворити</button><button data-action="shuffle-list" data-category="${category}">${icon('shuffle')} Тасувати</button></div>` : ''}
     <div class="category-content">${rows}</div>`;
 }
 
 function renderSettings() {
-  const online = navigator.onLine;
   const profile = state.googleProfile;
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><h2>Налаштування</h2><span></span></header>
     <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name || profile.email)}` : 'Войти через Google'}"><span class="profile-button profile-button--large ${profilePictureUrl(profile) ? 'profile-button--photo' : ''}">${profileAvatarContents(profile)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name || profile.email) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
-    <div class="settings-group"><div class="settings-row"><span>Стан мережі</span><strong class="${online ? 'online-label' : 'offline-label'}">${online ? 'Підключено' : 'Офлайн'}</strong></div><div class="settings-row"><span>Оновлення застосунку</span><button data-action="check-updates">Оновити</button></div><div class="settings-row"><span>Офлайн-аудіо</span><strong>${state.localTracks.length} пісень</strong></div></div>
     <button class="import-panel" data-action="import">${icon('plus')}<span><strong>Додати аудіофайли</strong><small>Файли залишаються лише на вашому пристрої</small></span>${icon('back', 'chevron')}</button>
     <button class="import-panel" data-action="drive-import">${icon('download')}<span><strong>Импорт из Google Диска</strong><small>Выбранные файлы сохраняются только на этом устройстве</small></span>${icon('back', 'chevron')}</button>
     <a class="import-panel profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>
@@ -682,7 +637,9 @@ function renderTabBar() {
 
 function renderPlayer() {
   const track = currentTrack();
-  $('#mini-player').innerHTML = `<button class="player-track" data-action="now-playing">${artMarkup(track.art, track.album, 'player-art')}<span class="player-copy"><strong>${safeText(track.title)}</strong><small>${safeText(track.artist)}</small></span></button><button class="player-control" data-action="toggle-play" aria-label="${state.isPlaying ? 'Пауза' : 'Відтворити'}">${icon(state.isPlaying ? 'pause' : 'play')}</button><button class="player-control player-next" data-action="next-track" aria-label="Наступна пісня">${icon('next')}</button>`;
+  $('#mini-player').innerHTML = track
+    ? `<button class="player-track" data-action="now-playing">${artMarkup(track.art, track.album, 'player-art')}<span class="player-copy"><strong>${safeText(track.title)}</strong><small>${safeText(track.artist)}</small></span></button><button class="player-control" data-action="toggle-play" aria-label="${state.isPlaying ? 'Пауза' : 'Відтворити'}">${icon(state.isPlaying ? 'pause' : 'play')}</button><button class="player-control player-next" data-action="next-track" aria-label="Наступна пісня">${icon('next')}</button>`
+    : `<button class="player-track" data-action="import">${artMarkup('local', '', 'player-art')}<span class="player-copy"><strong>Додати аудіофайл</strong><small>Офлайн-медіатека</small></span></button><button class="player-control" disabled aria-label="Немає пісень">${icon('play')}</button><button class="player-control player-next" disabled aria-label="Немає наступної пісні">${icon('next')}</button>`;
 }
 
 function formatPlayerTime(seconds) {
@@ -693,6 +650,7 @@ function formatPlayerTime(seconds) {
 
 function renderNowPlayingScreen() {
   const track = currentTrack();
+  if (!track) return '';
   const playable = Boolean(track.local);
   const duration = playable && Number.isFinite(audio.duration) ? audio.duration : 0;
   const progress = duration ? Math.min(100, audio.currentTime / duration * 100) : 0;
@@ -728,6 +686,7 @@ function renderNowPlayingScreen() {
 let nowPlayingClosing = false;
 
 function openNowPlaying() {
+  if (!currentTrack()) return;
   const root = $('#player-root');
   if (root.firstElementChild) return;
   root.innerHTML = `<div id="now-playing-root" class="now-playing-root">${renderNowPlayingScreen()}</div>`;
@@ -817,9 +776,9 @@ function syncNowPlayingPlayback() {
     button.setAttribute('aria-label', state.isPlaying ? 'Пауза' : 'Відтворити');
   }
   const currentTime = $('#player-current-time');
-  if (currentTime) currentTime.textContent = formatPlayerTime(track.local ? audio.currentTime : 0);
+  if (currentTime) currentTime.textContent = formatPlayerTime(track?.local ? audio.currentTime : 0);
   const progress = $('#player-progress');
-  if (progress && track.local) {
+  if (progress && track?.local) {
     const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
     progress.max = String(duration);
     progress.value = String(Math.min(audio.currentTime || 0, duration));
@@ -838,7 +797,7 @@ function syncNowPlayingTrack() {
   const note = $('.now-playing-note');
   const progress = $('#player-progress');
   const volume = $('#player-volume');
-  if (!artwork) return;
+  if (!artwork || !track) return;
   artwork.innerHTML = artMarkup(track.art, track.album, 'now-playing-art');
   if (copy) copy.innerHTML = `<strong>${safeText(track.title)}</strong><span>${safeText(track.artist)}</span>`;
   if (favoriteButton) {
@@ -1135,6 +1094,8 @@ async function playTrack(track) {
   } else if (audio.ended) {
     audio.currentTime = 0;
   }
+  state.recentTrackIds = [track.id, ...state.recentTrackIds.filter((id) => id !== track.id)].slice(0, 30);
+  localStorage.setItem('muzika-recent-tracks', JSON.stringify(state.recentTrackIds));
   try {
     await audio.play();
     state.isPlaying = true;
@@ -1364,16 +1325,12 @@ content.addEventListener('touchcancel', () => {
   resetPullIndicator();
 }, { passive: true });
 
-async function checkForUpdates() {
-  await forceRefreshOfflineShell();
-}
-
 document.addEventListener('click', async (event) => {
   const tab = event.target.closest('[data-tab]');
   if (tab) return navigateTab(tab.dataset.tab);
   const button = event.target.closest('[data-action]');
   if (!button) return;
-  const { action, id, kind, category, scope, term, title } = button.dataset;
+  const { action, id, kind, category, term } = button.dataset;
 
   switch (action) {
     case 'category': pushScreen({ type: 'category', category }); break;
@@ -1403,10 +1360,9 @@ document.addEventListener('click', async (event) => {
       let list = [];
       if (button.dataset.category === 'downloaded') list = allTracks().filter((track) => track.local);
       else if (button.dataset.kind === 'artist') list = allTracks().filter((track) => track.artist === id);
-      else if (button.dataset.kind === 'album') {
-        const album = albums.find((item) => item.id === id);
-        list = allTracks().filter((track) => track.album === album?.title);
-      } else if (id === 'favorites') list = allTracks().filter((track) => state.favorites.includes(track.id));
+      else if (button.dataset.kind === 'album') list = allTracks().filter((track) => track.album === id);
+      else if (id === 'favorites') list = allTracks().filter((track) => state.favorites.includes(track.id));
+      else if (id === 'recent') list = state.recentTrackIds.map((trackId) => allTracks().find((track) => track.id === trackId)).filter(Boolean);
       else list = allTracks();
       await playTrack(list.find((track) => track.local));
       break;
@@ -1414,18 +1370,15 @@ document.addEventListener('click', async (event) => {
     case 'shuffle-list': {
       let list = allTracks().filter((track) => track.local);
       if (button.dataset.kind === 'artist') list = list.filter((track) => track.artist === id);
-      if (button.dataset.kind === 'album') {
-        const album = albums.find((item) => item.id === id);
-        list = list.filter((track) => track.album === album?.title);
-      }
+      if (button.dataset.kind === 'album') list = list.filter((track) => track.album === id);
       if (id === 'favorites') list = list.filter((track) => state.favorites.includes(track.id));
+      if (id === 'recent') list = state.recentTrackIds.map((trackId) => allTracks().find((track) => track.id === trackId)).filter(Boolean);
       const shuffled = list[Math.floor(Math.random() * list.length)];
       await playTrack(shuffled);
       break;
     }
     case 'clear-search': state.recentSearches = []; localStorage.removeItem('muzika-searches'); render(); break;
     case 'close-search': state.searchText = ''; state.tab = 'home'; state.screenStack = []; state.screen = { type: 'tab', tab: 'home' }; render(); break;
-    case 'search-scope': state.searchScope = scope; render(); break;
     case 'recent-search': state.searchText = term; render(); break;
     case 'song-menu': {
       const track = allTracks().find((item) => item.id === id);
@@ -1463,14 +1416,12 @@ document.addEventListener('click', async (event) => {
     case 'open-track-album': {
       const track = allTracks().find((item) => item.id === id);
       if (track) {
-        const album = albums.find((item) => item.title === track.album);
         closeSongMenu();
-        pushScreen({ type: 'item', kind: 'album', id: album?.id || track.album });
+        pushScreen({ type: 'item', kind: 'album', id: track.album });
       }
       break;
     }
     case 'delete-track': await deleteTrackFromLibrary(id); break;
-    case 'station': notify(`«${title}» — радіостанції з’являться після підключення онлайн-каталогу.`); break;
     case 'recent': pushScreen({ type: 'item', kind: 'playlist', id: 'recent' }); break;
     case 'all-albums': pushScreen({ type: 'category', category: 'albums' }); break;
     case 'now-playing': openNowPlaying(); break;
@@ -1479,6 +1430,7 @@ document.addEventListener('click', async (event) => {
     case 'player-queue': notify(state.queue.length ? `У черзі: ${state.queue.length} пісень.` : 'Черга відтворення порожня.'); break;
     case 'toggle-player-favorite': {
       const track = currentTrack();
+      if (!track) break;
       if (state.favorites.includes(track.id)) state.favorites = state.favorites.filter((favorite) => favorite !== track.id);
       else state.favorites.push(track.id);
       localStorage.setItem('muzika-favorites', JSON.stringify(state.favorites));
@@ -1490,7 +1442,6 @@ document.addEventListener('click', async (event) => {
       }
       break;
     }
-    case 'check-updates': checkForUpdates(); break;
   }
 });
 
@@ -1512,7 +1463,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 $('#player-root').addEventListener('input', (event) => {
-  if (event.target.id === 'player-progress' && currentTrack().local) {
+  if (event.target.id === 'player-progress' && currentTrack()?.local) {
     audio.currentTime = Number(event.target.value);
     event.target.style.setProperty('--range-progress', `${audio.duration ? audio.currentTime / audio.duration * 100 : 0}%`);
     const time = $('#player-current-time');
@@ -1585,6 +1536,15 @@ async function startServiceWorkerUpdateCheck() {
 async function initialize() {
   const refreshScrollTop = restoreScreenAfterRefresh();
   try { state.localTracks = await database.all(); } catch { state.localTracks = []; }
+  const validTrackIds = new Set(state.localTracks.map((track) => track.id));
+  state.favorites = state.favorites.filter((id) => validTrackIds.has(id));
+  state.pinnedSongs = state.pinnedSongs.filter((id) => validTrackIds.has(id));
+  state.recentTrackIds = state.recentTrackIds.filter((id) => validTrackIds.has(id));
+  state.currentTrackId = validTrackIds.has(state.currentTrackId) ? state.currentTrackId : state.localTracks[0]?.id || '';
+  localStorage.setItem('muzika-favorites', JSON.stringify(state.favorites));
+  localStorage.setItem('muzika-pinned-songs', JSON.stringify(state.pinnedSongs));
+  localStorage.setItem('muzika-recent-tracks', JSON.stringify(state.recentTrackIds));
+  localStorage.removeItem('muzika-hidden-tracks');
   render();
   if (refreshScrollTop !== null) content.scrollTop = refreshScrollTop;
   startServiceWorkerUpdateCheck();
