@@ -117,7 +117,7 @@ async function downloadYouTubeAudio(videoId) {
   notify('Запитуємо MP3 у cobalt…');
   let response;
   try {
-    response = await fetch('https://api.cobalt.tools/', {
+    response = await fetch('https://cobalt-tools-production-6e230014.up.railway.app/', {
       method: 'POST',
       headers: {
         'Accept': 'application/json',
@@ -814,7 +814,7 @@ function renderSettings() {
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><h2>Налаштування</h2><span></span></header>
     <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name || profile.email)}` : 'Войти через Google'}"><span class="profile-button profile-button--large ${profilePictureUrl(profile) ? 'profile-button--photo' : ''}">${profileAvatarContents(profile)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name || profile.email) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
     <a class="settings-action-card profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>
-    <button class="settings-action-card" data-action="download-server-settings">${icon('download')}<span><strong>Завантаження з Mac</strong><small>${downloadServerConfig() ? `Підключено: ${safeText(downloadServerConfig().server)}` : 'Сервер не підключено'}</small></span>${icon('back', 'chevron')}</button>`;
+    `;
 }
 
 const GOOGLE_CLIENT_ID = document.querySelector('meta[name="google-client-id"]')?.content.trim() || '';
@@ -913,22 +913,6 @@ function openGoogleAccount() {
   if (!profile) prepareGoogleSignIn();
 }
 
-
-function openDownloadServerSettings() {
-  const config = downloadServerConfig();
-  $('#modal-root').innerHTML = `<div id="download-server-backdrop" class="action-modal">
-    <section class="action-sheet" role="dialog" aria-modal="true" aria-label="Сервер завантаження">
-      <h2 style="margin: 6px 4px 12px; font-size: 20px;">Сервер завантаження</h2>
-      <p style="margin: 0 4px 12px; color: #b7b7bd; font-size: 14px; line-height: 1.45;">Вставте посилання, яке показав сервер на Mac (воно містить адресу та токен).</p>
-      <input id="download-server-input" type="url" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://192.168.1.10:3443/#muzika-download-server=…&amp;muzika-download-token=…" value="${config ? safeText(`${config.server}/#muzika-download-server=${encodeURIComponent(config.server)}&muzika-download-token=${encodeURIComponent(config.token)}`) : ''}" style="width: 100%; min-height: 46px; padding: 10px 14px; border: 1px solid #444448; border-radius: 14px; background: #242427; color: #f5f5f7; font-size: 14px;">
-      <button class="song-action-row" data-action="save-download-server">${icon('check')}<span>Підключити сервер</span></button>
-      ${config ? `<button class="song-action-row song-action-row--danger" data-action="clear-download-server">${icon('trash')}<span>Відключити сервер</span></button>` : ''}
-    </section>
-  </div>`;
-  $('#download-server-backdrop').addEventListener('click', (event) => {
-    if (event.target.id === 'download-server-backdrop') closeSongMenu();
-  });
-}
 
 function renderScreen() {
   switch (state.screen.type) {
