@@ -525,6 +525,7 @@ async function fetchYouTubeSearch(query, category, channelId, requestId) {
   }
   const controller = new AbortController();
   youtubeSearchController = controller;
+  const timeoutId = setTimeout(() => controller.abort(), 12000);
   try {
     const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${parameters}`, { signal: controller.signal });
     const payload = await response.json();
@@ -545,10 +546,15 @@ async function fetchYouTubeSearch(query, category, channelId, requestId) {
     state.youtubeSearchError = '';
     refreshSearchResults();
   } catch (error) {
-    if (error.name === 'AbortError' || requestId !== youtubeSearchRequestId) return;
+    if (requestId !== youtubeSearchRequestId) return;
     state.youtubeSearchStatus = 'error';
-    state.youtubeSearchError = error.message || 'Не вдалося завантажити результати. Спробуйте ще раз.';
+    state.youtubeSearchError = controller.signal.aborted
+      ? 'YouTube не відповідає вчасно. Перевірте з’єднання й спробуйте ще раз.'
+      : error.message || 'Не вдалося завантажити результати. Спробуйте ще раз.';
     refreshSearchResults();
+  } finally {
+    clearTimeout(timeoutId);
+    if (youtubeSearchController === controller) youtubeSearchController = null;
   }
 }
 
