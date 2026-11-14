@@ -155,12 +155,14 @@ async function openMacSync() {
   const config = downloadServerConfig();
   const root = $('#modal-root');
   if (!config) return notify('Спочатку підключіть iPod на Mac у налаштуваннях.');
-  root.innerHTML = '<div class="action-modal mac-sync-modal"><section class="mac-sync-sheet" role="dialog" aria-modal="true" aria-labelledby="mac-sync-title"><header><div><h2 id="mac-sync-title">Синхронізація з Mac</h2><p id="mac-sync-status">Отримую список пісень…</p></div><button data-action="close-mac-sync" aria-label="Закрити">×</button></header><div id="mac-sync-progress" class="mac-sync-progress" hidden aria-live="polite"><div class="mac-sync-progress-heading"><strong id="mac-sync-current-title"></strong><span id="mac-sync-progress-count"></span></div><div class="mac-sync-progress-track" role="progressbar" aria-label="Прогрес синхронізації" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="mac-sync-progress-fill"></span></div><small id="mac-sync-progress-detail"></small></div><div id="mac-sync-list" class="mac-sync-list"><div class="empty-state">Підключення…</div></div><footer><button data-action="close-mac-sync">Закрити</button><button data-action="mac-sync-download" disabled>Завантажити вибрані</button></footer></section></div>';
+  root.innerHTML = '<div class="action-modal mac-sync-modal"><section class="mac-sync-sheet" role="dialog" aria-modal="true" aria-labelledby="mac-sync-title"><header><div><h2 id="mac-sync-title">Синхронізація з Mac</h2><p id="mac-sync-status">Отримую список пісень…</p></div><button data-action="close-mac-sync" aria-label="Закрити">×</button></header><div id="mac-sync-progress" class="mac-sync-progress" aria-live="polite"><div class="mac-sync-progress-heading"><strong id="mac-sync-current-title">Підключаюся до Mac…</strong><span id="mac-sync-progress-count">Очікування</span></div><div class="mac-sync-progress-track is-indeterminate" role="progressbar" aria-label="Прогрес синхронізації" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Отримую список пісень"><span id="mac-sync-progress-fill"></span></div><small id="mac-sync-progress-detail">Отримую список пісень…</small></div><div id="mac-sync-list" class="mac-sync-list"><div class="empty-state">Підключення…</div></div><footer><button data-action="close-mac-sync">Закрити</button><button data-action="mac-sync-download" disabled>Завантажити вибрані</button></footer></section></div>';
   try {
     const response = await fetch(config.server + '/api/library', { headers: { Authorization: 'Bearer ' + config.token } });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'Не вдалося підключитися до Mac.');
     const tracks = Array.isArray(payload.tracks) ? payload.tracks : [];
+    const loadingProgress = $('#mac-sync-progress');
+    if (loadingProgress) { loadingProgress.hidden = true; $('.mac-sync-progress-track', loadingProgress).classList.remove('is-indeterminate'); }
     window.__ipodSyncMetadata = Object.fromEntries(tracks.map((track) => [track.id, track]));
     const existing = new Map(state.localTracks.filter((track) => track.id.startsWith('mac-')).map((track) => [track.id.slice(4), track]));
     const list = $('#mac-sync-list');
@@ -185,6 +187,8 @@ async function openMacSync() {
     button.disabled = newTracks.length === 0;
     button.textContent = newTracks.length ? 'Завантажити вибрані' : 'Усе синхронізовано';
   } catch (error) {
+    const progress = $('#mac-sync-progress');
+    if (progress) progress.hidden = true;
     const status = $('#mac-sync-status');
     if (status) status.textContent = error.message || 'Не вдалося отримати список пісень з Mac.';
     const list = $('#mac-sync-list');
@@ -212,6 +216,7 @@ async function syncSelectedMacTracks() {
   button.disabled = true;
   button.textContent = 'Завантаження…';
   progress.hidden = false;
+  progressTrack.classList.remove('is-indeterminate');
   root.querySelectorAll('[data-mac-track]').forEach((input) => { input.disabled = true; });
   let completed = 0;
   let failed = 0;
