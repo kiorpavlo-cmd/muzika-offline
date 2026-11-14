@@ -2,6 +2,39 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const content = $('#content');
 const audio = $('#audio-element');
 
+const database = (() => {
+  let connection;
+  function open() {
+    if (connection) return connection;
+    connection = new Promise((resolve, reject) => {
+      const request = indexedDB.open('ipod-audio-library', 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains('tracks')) request.result.createObjectStore('tracks', { keyPath: 'id' });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('IndexedDB недоступна.'));
+    });
+    return connection;
+  }
+  async function transact(mode, action) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction('tracks', mode);
+      const store = transaction.objectStore('tracks');
+      let result;
+      try { result = action(store); } catch (error) { reject(error); return; }
+      transaction.oncomplete = () => resolve(result?.result);
+      transaction.onerror = () => reject(transaction.error || new Error('Помилка медіатеки.'));
+      transaction.onabort = () => reject(transaction.error || new Error('Запис скасовано.'));
+    });
+  }
+  return {
+    all: () => transact('readonly', (store) => store.getAll()),
+    add: (track) => transact('readwrite', (store) => store.put(track)),
+    remove: (id) => transact('readwrite', (store) => store.delete(id))
+  };
+})();
+
 const icons = {
   home: '<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/>',
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
@@ -106,6 +139,105 @@ function downloadServerConfig() {
   const token = localStorage.getItem('muzika-download-token') || '';
   if (!server || !token) return null;
   return { server: server.replace(/\/+$/, ''), token };
+}
+
+function formatSyncSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 МБ';
+  const units = ['Б', 'КБ', 'МБ', 'ГБ'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return value.toFixed(unit > 1 ? 1 : 0) + ' ' + units[unit];
+}
+
+async function openMacSync() {
+  const config = downloadServerConfig();
+  const root = $('#modal-root');
+  if (!config) return notify('Спочатку підключіть iPod на Mac у налаштуваннях.');
+  root.innerHTML = '<div class="action-modal mac-sync-modal"><section class="mac-sync-sheet" role="dialog" aria-modal="true" aria-labelledby="mac-sync-title"><header><div><h2 id="mac-sync-title">Синхронізація з Mac</h2><p id="mac-sync-status">Отримую список пісень…</p></div><button data-action="close-mac-sync" aria-label="Закрити">×</button></header><div id="mac-sync-list" class="mac-sync-list"><div class="empty-state">Підключення…</div></div><footer><button data-action="close-mac-sync">Закрити</button><button data-action="mac-sync-download" disabled>Завантажити вибрані</button></footer></section></div>';
+  try {
+    const response = await fetch(config.server + '/api/library', { headers: { Authorization: 'Bearer ' + config.token } });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Не вдалося підключитися до Mac.');
+    const tracks = Array.isArray(payload.tracks) ? payload.tracks : [];
+    window.__ipodSyncMetadata = Object.fromEntries(tracks.map((track) => [track.id, track]));
+    const existing = new Map(state.localTracks.filter((track) => track.id.startsWith('mac-')).map((track) => [track.id.slice(4), track]));
+    const list = $('#mac-sync-list');
+    const newTracks = tracks.filter((track) => {
+      const saved = existing.get(track.id);
+      return !saved || saved.syncMtime !== track.mtime || saved.syncSize !== track.size;
+    });
+    $('#mac-sync-status').textContent = tracks.length
+      ? 'На Mac знайдено ' + tracks.length + ' пісень. Позначено нові та змінені.'
+      : 'У вибраній папці Mac аудіофайлів не знайдено.';
+    if (!tracks.length) {
+      list.innerHTML = '<div class="empty-state">Перевірте, що вибрано папку медіатеки та завершено сканування iPod на Mac.</div>';
+      return;
+    }
+    const newIds = new Set(newTracks.map((track) => track.id));
+    list.innerHTML = tracks.map((track) => {
+      const details = [track.artist, track.album, formatSyncSize(track.size)].filter(Boolean).map(safeText).join(' · ');
+      return '<label class="mac-sync-track"><input type="checkbox" data-mac-track="' + safeText(track.id) + '"' + (newIds.has(track.id) ? ' checked' : '') + '><span><strong>' + safeText(track.title || track.file) + '</strong><small>' + (details || safeText(track.file)) + '</small></span></label>';
+    }).join('');
+    $('#mac-sync-status').textContent += ' Нових або змінених: ' + newTracks.length + '.';
+    const button = $('[data-action="mac-sync-download"]', root);
+    button.disabled = newTracks.length === 0;
+    button.textContent = newTracks.length ? 'Завантажити вибрані' : 'Усе синхронізовано';
+  } catch (error) {
+    const status = $('#mac-sync-status');
+    if (status) status.textContent = error.message || 'Не вдалося отримати список пісень з Mac.';
+    const list = $('#mac-sync-list');
+    if (list) list.innerHTML = '<div class="empty-state">Перевірте, що сервер iPod запущено, телефон і Mac під’єднані до однієї мережі Wi‑Fi, а профілю сертифіката довіряють.</div>';
+  }
+}
+
+async function syncSelectedMacTracks() {
+  const config = downloadServerConfig();
+  const root = $('#modal-root');
+  if (!config) return notify('Спочатку підключіть iPod на Mac у налаштуваннях.');
+  const selectedIds = [...root.querySelectorAll('[data-mac-track]:checked')].map((input) => input.dataset.macTrack);
+  if (!selectedIds.length) return notify('Позначте пісні для синхронізації.');
+  const status = $('#mac-sync-status');
+  const button = $('[data-action="mac-sync-download"]', root);
+  button.disabled = true;
+  let completed = 0;
+  let failed = 0;
+  for (const id of selectedIds) {
+    try {
+      const remote = await fetch(config.server + '/api/library/audio?id=' + encodeURIComponent(id), {
+        headers: { Authorization: 'Bearer ' + config.token }
+      });
+      if (!remote.ok) throw new Error('download-failed');
+      const blob = await remote.blob();
+      const metadata = window.__ipodSyncMetadata?.[id] || {};
+      const file = new File([blob], metadata.file || 'iPod audio', { type: blob.type || 'audio/mpeg' });
+      const track = {
+        id: 'mac-' + id,
+        title: metadata.title || file.name.replace(/\.[^.]+$/, ''),
+        artist: metadata.artist || '',
+        album: metadata.album || '',
+        year: metadata.year || '',
+        genre: metadata.genre || '',
+        art: ['local', 'violet', 'blue', 'rose'][state.localTracks.length % 4],
+        local: true,
+        file,
+        syncMtime: metadata.mtime || 0,
+        syncSize: metadata.size || blob.size
+      };
+      await database.add(track);
+      const oldIndex = state.localTracks.findIndex((item) => item.id === track.id);
+      if (oldIndex >= 0) state.localTracks[oldIndex] = track;
+      else state.localTracks.push(track);
+    } catch {
+      failed += 1;
+    }
+    completed += 1;
+    if (status) status.textContent = 'Синхронізовано ' + completed + ' з ' + selectedIds.length + (failed ? ' · помилок: ' + failed : '');
+  }
+  window.__ipodSyncMetadata = null;
+  root.innerHTML = '';
+  render();
+  notify(failed ? 'Синхронізацію завершено. Помилок: ' + failed + '.' : 'Синхронізовано пісень: ' + completed + '.');
 }
 
 async function downloadYouTubeAudio(videoId) {
@@ -451,6 +583,7 @@ function renderLibrary() {
   const added = [...allTracks()].reverse();
   return `<header class="page-header page-header--library"><h1>Медіатека</h1>${profileButtonMarkup()}</header>
     <div class="category-list">${categories}</div>
+    <div class="library-import-card"><button class="settings-action-card" data-action="import-audio">${icon('plus')}<span><strong>Додати музику з цього пристрою</strong><small>Аудіофайли збережуться в офлайн-медіатеці iPod</small></span></button></div>
     ${added.length ? `${sectionHeading('Недавно додані', 'Усі', 'all-albums')}<div class="song-list">${added.slice(0, 8).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : ''}
     ${state.youtubeLibrary.length ? `${sectionHeading('Збережені з YouTube · онлайн')}<div class="song-list">${state.youtubeLibrary.map((item) => youtubeResultRow(item, { saved: true })).join('')}</div>` : ''}`;
 }
@@ -824,10 +957,18 @@ function renderCategory() {
 
 function renderSettings() {
   const profile = state.googleProfile;
-  return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><h2>Налаштування</h2><span></span></header>
-    <button class="settings-profile" data-action="google-account" aria-label="${profile ? `Google: ${safeText(profile.name || profile.email)}` : 'Войти через Google'}"><span class="profile-button profile-button--large ${profilePictureUrl(profile) ? 'profile-button--photo' : ''}">${profileAvatarContents(profile)}</span><span class="settings-profile-copy"><strong>${profile ? safeText(profile.name || profile.email) : 'Моя медіатека'}</strong><small>${profile ? safeText(profile.email) : 'Войти через Google'}</small></span>${icon('back', 'chevron')}</button>
-    <a class="settings-action-card profile-download" href="./Muzika.mobileconfig">${icon('home')}<span><strong>Додати ярлик на iPhone або iPad</strong><small>Завантажити профіль вебзастосунку</small></span>${icon('back', 'chevron')}</a>
-    `;
+  const macServer = downloadServerConfig();
+  const profileLabel = profile ? safeText(profile.name || profile.email) : 'Моя медіатека';
+  const profileSub = profile ? safeText(profile.email) : 'Увійти через Google';
+  const connectedCopy = macServer ? safeText(macServer.server) : 'Вставте посилання з Mac, потім натисніть кнопку';
+  return '<header class="subpage-top"><button class="round-back" data-action="back">' + icon('back') + '</button><h2>Налаштування</h2><span></span></header>' +
+    '<button class="settings-profile" data-action="google-account"><span class="profile-button profile-button--large">' + profileAvatarContents(profile) + '</span><span class="settings-profile-copy"><strong>' + profileLabel + '</strong><small>' + profileSub + '</small></span>' + icon('back', 'chevron') + '</button>' +
+    '<a class="settings-action-card profile-download" href="./iPod.mobileconfig">' + icon('home') + '<span><strong>Додати iPod на iPhone або iPad</strong><small>Завантажити профіль із піктограмою iPod</small></span>' + icon('back', 'chevron') + '</a>' +
+    '<section class="mac-sync-settings"><h3>Синхронізація з Mac</h3><p>Передавайте музику з папки на Mac до офлайн-медіатеки iPod на iPhone через одну мережу Wi‑Fi.</p>' +
+    '<label for="download-server-input">Посилання підключення з Mac</label><textarea id="download-server-input" rows="3" placeholder="Вставте посилання зі сторінки iPod на Mac"></textarea>' +
+    '<button class="settings-action-card mac-sync-connect" data-action="save-download-server">' + icon('check') + '<span><strong>' + (macServer ? 'Mac підключено' : 'Підключити Mac') + '</strong><small>' + connectedCopy + '</small></span></button>' +
+    '<button class="settings-action-card mac-sync-start" data-action="mac-sync"' + (macServer ? '' : ' disabled') + '>' + icon('download') + '<span><strong>Синхронізувати музику</strong><small>Виберіть нові або змінені пісні для завантаження</small></span></button>' +
+    (macServer ? '<button class="mac-sync-disconnect" data-action="clear-download-server">Від’єднати Mac</button>' : '') + '</section>';
 }
 
 const GOOGLE_CLIENT_ID = document.querySelector('meta[name="google-client-id"]')?.content.trim() || '';
@@ -915,8 +1056,8 @@ function openGoogleAccount() {
     <section class="account-sheet" role="dialog" aria-modal="true" aria-labelledby="account-title">
       <button class="account-close" data-action="close-google-account" aria-label="Закрити">${icon('close')}</button>
       <div class="account-mark">G</div>
-      <h2 id="account-title">${profile ? 'Аккаунт Google' : 'Войти через Google'}</h2>
-      ${profile ? `<p class="account-message account-message--signed">${safeText(profile.name)}<br><span>${safeText(profile.email)}</span></p><button class="account-signout" data-action="google-signout">Выйти из аккаунта в приложении</button>` : '<div id="google-signin-button" class="google-signin-button"></div>'}
+      <h2 id="account-title">${profile ? 'Обліковий запис Google' : 'Увійти через Google'}</h2>
+      ${profile ? `<p class="account-message account-message--signed">${safeText(profile.name)}<br><span>${safeText(profile.email)}</span></p><button class="account-signout" data-action="google-signout">Вийти з акаунта в застосунку</button>` : '<div id="google-signin-button" class="google-signin-button"></div>'}
       <p class="account-footnote">Музыка и аудиофайлы остаются только на этом устройстве.</p>
     </section>
   </div>`;
@@ -1495,7 +1636,8 @@ async function playTrack(track) {
 }
 
 async function storeAudioFiles(files, { notifyUser = true } = {}) {
-  const audioFiles = [...files].filter((file) => file.type.startsWith('audio/'));
+  const audioExtensions = /\.(mp3|m4a|aac|wav|flac|ogg|oga|opus|aiff|aif|caf|wma|ape|wv|mpc|tta)$/i;
+  const audioFiles = [...files].filter((file) => file.type.startsWith('audio/') || audioExtensions.test(file.name));
   if (!audioFiles.length) {
     if (notifyUser) notify('Оберіть аудіофайл.');
     return false;
@@ -1718,6 +1860,12 @@ appShell.addEventListener('touchcancel', () => {
   resetPullIndicator();
 }, { passive: true });
 
+$('#audio-file-input').addEventListener('change', async (event) => {
+  const files = [...(event.target.files || [])];
+  event.target.value = '';
+  await storeAudioFiles(files);
+});
+
 document.addEventListener('click', async (event) => {
   const tab = event.target.closest('[data-tab]');
   if (tab) return navigateTab(tab.dataset.tab);
@@ -1732,7 +1880,12 @@ document.addEventListener('click', async (event) => {
     case 'back': navigateBack(); break;
     case 'settings': pushScreen({ type: 'settings' }); break;
     case 'youtube-download-placeholder': await downloadYouTubeAudio(id); break;
-    case 'download-server-settings': openDownloadServerSettings(); break;
+    case 'mac-sync': await openMacSync(); break;
+    case 'mac-sync-download': await syncSelectedMacTracks(); break;
+    case 'close-mac-sync': $('#modal-root').innerHTML = ''; break;
+    case 'import-audio':
+      $('#audio-file-input')?.click();
+      break;
     case 'save-download-server': {
       const input = $('#download-server-input');
       const raw = input?.value?.trim() || '';
@@ -1750,15 +1903,15 @@ document.addEventListener('click', async (event) => {
       const params = new URLSearchParams(parsed.hash.replace(/^#/, ''));
       const server = params.get('muzika-download-server') || '';
       const token = params.get('muzika-download-token') || '';
-      if (!server || !token) {
-        notify('У посиланні немає адреси сервера або токена.');
+      if (!server || !token || !server.startsWith('https://') || !/^[a-f0-9]{64}$/i.test(token)) {
+        notify('Посилання iPod з Mac некоректне. Скопіюйте його повністю.');
         break;
       }
       localStorage.setItem('muzika-download-server', server.replace(/\/+$/, ''));
       localStorage.setItem('muzika-download-token', token);
       closeSongMenu();
       render();
-      notify('Сервер завантаження підключено.');
+      notify('iPod на Mac підключено.');
       break;
     }
     case 'clear-download-server':
@@ -1766,7 +1919,7 @@ document.addEventListener('click', async (event) => {
       localStorage.removeItem('muzika-download-token');
       closeSongMenu();
       render();
-      notify('Сервер завантаження відключено.');
+      notify('Сервер iPod від’єднано.');
       break;
     case 'google-account': openGoogleAccount(); break;
     case 'close-google-account': closeGoogleAccount(); break;

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'muzika-shell-v17';
+const CACHE_NAME = 'muzika-shell-v18';
 const STAGING_PREFIX = 'muzika-refresh-staging-';
 const APP_FILES = [
   './',
@@ -6,7 +6,7 @@ const APP_FILES = [
   './styles.css',
   './app.js',
   './manifest.webmanifest',
-  './Muzika.mobileconfig',
+  './iPod.mobileconfig',
   './assets/icon.png'
 ];
 

@@ -13,6 +13,11 @@ const HTTPS_PORT = Number(process.env.MUZIKA_PORT || 3443);
 const HOST = process.env.MUZIKA_HOST || '0.0.0.0';
 const MAX_REQUEST_BYTES = 2048;
 const MAX_AUDIO_BYTES = 120 * 1024 * 1024;
+const LIBRARY_AUDIO_EXTENSIONS = new Set([
+  '.mp3', '.m4a', '.mp4', '.flac', '.ogg', '.oga', '.opus',
+  '.wav', '.aiff', '.aif', '.wma', '.ape', '.wv', '.mpc', '.tta'
+]);
+let cachedLibrary = { root: '', savedAt: 0, tracks: [] };
 const DOWNLOAD_TIMEOUT_MS = 8 * 60 * 1000;
 const ALLOWED_CORS_ORIGINS = new Set((process.env.MUZIKA_ALLOWED_ORIGINS || 'https://kiorpavlo-cmd.github.io')
   .split(',').map((origin) => origin.trim()).filter(Boolean));
@@ -64,13 +69,13 @@ function safeHostname() {
 
 function createCertificates() {
   fs.mkdirSync(CERT_DIR, { recursive: true, mode: 0o700 });
-  const caKey = path.join(CERT_DIR, 'ca-key.pem');
-  const caCert = path.join(CERT_DIR, 'ca.pem');
-  const serverKey = path.join(CERT_DIR, 'server-key.pem');
-  const serverCsr = path.join(CERT_DIR, 'server.csr');
-  const serverCert = path.join(CERT_DIR, 'server.pem');
-  const caConfig = path.join(CERT_DIR, 'ca.cnf');
-  const serverExt = path.join(CERT_DIR, 'server.ext');
+  const caKey = path.join(CERT_DIR, 'ipod-ca-key.pem');
+  const caCert = path.join(CERT_DIR, 'ipod-ca.pem');
+  const serverKey = path.join(CERT_DIR, 'ipod-server-key.pem');
+  const serverCsr = path.join(CERT_DIR, 'ipod-server.csr');
+  const serverCert = path.join(CERT_DIR, 'ipod-server.pem');
+  const caConfig = path.join(CERT_DIR, 'ipod-ca.cnf');
+  const serverExt = path.join(CERT_DIR, 'ipod-server.ext');
   const hostname = safeHostname();
   const lanAddresses = getLanAddresses();
 
@@ -81,7 +86,7 @@ function createCertificates() {
       'x509_extensions = v3_ca',
       'prompt = no',
       '[dn]',
-      'CN = Muzika Local Audio CA',
+      'CN = iPod Local Audio CA',
       '[v3_ca]',
       'basicConstraints = critical,CA:TRUE',
       'keyUsage = critical,keyCertSign,cRLSign',
@@ -130,18 +135,18 @@ function createCertificates() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>PayloadContent</key><array><dict>
-    <key>PayloadCertificateFileName</key><string>Muzika-Local-Audio-CA.cer</string>
+    <key>PayloadCertificateFileName</key><string>iPod-Local-Audio-CA.cer</string>
     <key>PayloadContent</key><data>${caDer}</data>
-    <key>PayloadDescription</key><string>Дозволяє iPhone довіряти локальному серверу Muzika на цьому Mac.</string>
-    <key>PayloadDisplayName</key><string>Muzika Local Audio CA</string>
-    <key>PayloadIdentifier</key><string>app.muzika.local.ca</string>
+    <key>PayloadDescription</key><string>Дозволяє iPhone довіряти локальному серверу iPod на цьому Mac.</string>
+    <key>PayloadDisplayName</key><string>iPod Local Audio CA</string>
+    <key>PayloadIdentifier</key><string>app.ipod.local.ca</string>
     <key>PayloadType</key><string>com.apple.security.root</string>
     <key>PayloadUUID</key><string>${certificateUUID}</string>
     <key>PayloadVersion</key><integer>1</integer>
   </dict></array>
-  <key>PayloadDisplayName</key><string>Muzika Local Audio Server</string>
-  <key>PayloadIdentifier</key><string>app.muzika.local.profile</string>
-  <key>PayloadOrganization</key><string>Muzika</string>
+  <key>PayloadDisplayName</key><string>iPod Local Audio Server</string>
+  <key>PayloadIdentifier</key><string>app.ipod.local.profile</string>
+  <key>PayloadOrganization</key><string>iPod</string>
   <key>PayloadRemovalDisallowed</key><false/>
   <key>PayloadType</key><string>Configuration</string>
   <key>PayloadUUID</key><string>${profileUUID}</string>
@@ -252,11 +257,140 @@ function startDownload(videoId, outputDir) {
   });
 }
 
-function requestDownload(req, res, token) {
+function isAuthorized(req, token) {
   const bearerToken = /^Bearer\s+([a-f0-9]{64})$/i.exec(req.headers.authorization || '')?.[1] || '';
-  if (!sameToken(cookieValue(req, 'muzika_download'), token) && !sameToken(bearerToken, token)) {
-    return writeJson(res, 401, { error: 'Невірний код доступу до сервера завантаження.' });
+  return sameToken(cookieValue(req, 'muzika_download'), token) || sameToken(bearerToken, token);
+}
+
+function configuredLibraryRoot() {
+  let folder = process.env.MUZIKA_LIBRARY_ROOT || '';
+  if (!folder) {
+    try {
+      const settingsPath = path.join(os.homedir(), 'Library', 'Application Support', 'Audio Library Tagger', 'settings.json');
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      folder = settings.folder || '';
+    } catch {
+      folder = '';
+    }
   }
+  if (!folder) throw new Error('Сначала откройте iPod на Mac, выберите музыкальную папку и запустите сканирование.');
+  const root = path.resolve(folder);
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+    throw new Error('Папка медиатеки недоступна. Выберите папку заново в iPod на Mac.');
+  }
+  return root;
+}
+
+function readCachedTrackTags(root) {
+  const cachePath = path.join(os.homedir(), 'Library', 'Application Support', 'Audio Library Tagger', 'library_cache.json');
+  try {
+    const payload = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    const rows = payload?.libraries?.[root]?.rows;
+    if (!Array.isArray(rows)) return new Map();
+    return new Map(rows.filter((row) => row?.path).map((row) => [path.resolve(row.path), row]));
+  } catch {
+    return new Map();
+  }
+}
+
+async function listLibraryTracks() {
+  const root = configuredLibraryRoot();
+  if (cachedLibrary.root === root && Date.now() - cachedLibrary.savedAt < 4000) return cachedLibrary.tracks;
+  const tags = readCachedTrackTags(root);
+  const tracks = [];
+  async function walk(directory) {
+    const entries = await fs.promises.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const candidate = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await walk(candidate);
+        continue;
+      }
+      if (!entry.isFile() || !LIBRARY_AUDIO_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
+      let realPath;
+      try { realPath = await fs.promises.realpath(candidate); } catch { continue; }
+      if (realPath !== root && !realPath.startsWith(root + path.sep)) continue;
+      const stat = await fs.promises.stat(realPath);
+      const relative = path.relative(root, realPath);
+      const row = tags.get(realPath) || {};
+      const stem = path.basename(realPath, path.extname(realPath));
+      const pieces = stem.split(/\s+[—–-]\s+/);
+      const fallbackArtist = pieces.length > 1 ? pieces[0] : '';
+      const fallbackTitle = pieces.length > 1 ? pieces.slice(1).join(' — ') : stem;
+      const yearMatch = stem.match(/\b(?:19|20)\d{2}\b/);
+      tracks.push({
+        id: Buffer.from(relative).toString('base64url'),
+        file: path.basename(realPath),
+        size: stat.size,
+        mtime: Math.trunc(stat.mtimeMs),
+        artist: row.artist || fallbackArtist,
+        title: row.title || fallbackTitle,
+        album: row.album || '',
+        year: row.year || (yearMatch ? yearMatch[0] : ''),
+        genre: row.genre || ''
+      });
+    }
+  }
+  await walk(root);
+  tracks.sort((a, b) => a.file.localeCompare(b.file, undefined, { sensitivity: 'base' }));
+  cachedLibrary = { root, savedAt: Date.now(), tracks };
+  return tracks;
+}
+
+function requestLibraryList(req, res, token) {
+  if (!isAuthorized(req, token)) return writeJson(res, 401, { error: 'Невірний код доступу до сервера iPod.' });
+  listLibraryTracks()
+    .then((tracks) => writeJson(res, 200, { total: tracks.length, tracks }))
+    .catch((error) => writeJson(res, 400, { error: error.message || 'Не вдалося прочитати медіатеку Mac.' }));
+}
+
+function requestLibraryAudio(req, res, token, url) {
+  if (!isAuthorized(req, token)) return writeJson(res, 401, { error: 'Невірний код доступу до сервера iPod.' });
+  const id = url.searchParams.get('id') || '';
+  let relative;
+  try {
+    relative = Buffer.from(id, 'base64url').toString('utf8');
+    if (!relative || Buffer.from(relative).toString('base64url') !== id) throw new Error('bad-id');
+  } catch {
+    return writeJson(res, 400, { error: 'Некоректний ідентифікатор аудіофайлу.' });
+  }
+  let root;
+  try { root = configuredLibraryRoot(); } catch (error) {
+    return writeJson(res, 400, { error: error.message || 'Папка медіатеки недоступна.' });
+  }
+  const candidate = path.resolve(root, relative);
+  if (candidate === root || !candidate.startsWith(root + path.sep) ||
+      !LIBRARY_AUDIO_EXTENSIONS.has(path.extname(candidate).toLowerCase())) {
+    return writeJson(res, 403, { error: 'Доступ до цього файлу заборонено.' });
+  }
+  fs.promises.realpath(candidate).then(async (filePath) => {
+    if (!filePath.startsWith(root + path.sep)) throw new Error('outside-library');
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile()) throw new Error('not-a-file');
+    const extension = path.extname(filePath).toLowerCase();
+    const contentType = {
+      '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.mp4': 'audio/mp4',
+      '.flac': 'audio/flac', '.ogg': 'audio/ogg', '.oga': 'audio/ogg',
+      '.opus': 'audio/ogg', '.wav': 'audio/wav', '.aiff': 'audio/aiff',
+      '.aif': 'audio/aiff', '.wma': 'audio/x-ms-wma', '.ape': 'audio/ape',
+      '.wv': 'audio/wavpack', '.mpc': 'audio/x-musepack', '.tta': 'audio/x-tta'
+    }[extension] || 'application/octet-stream';
+    const fileName = path.basename(filePath);
+    const safeName = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': stat.size,
+      'Content-Disposition': 'attachment; filename="' + safeName + '"; filename*=UTF-8\'\'' + encodeURIComponent(fileName),
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff'
+    });
+    fs.createReadStream(filePath).on('error', () => res.destroy()).pipe(res);
+  }).catch(() => writeJson(res, 404, { error: 'Файл не знайдено або він переміщений.' }));
+}
+
+function requestDownload(req, res, token) {
+  if (!isAuthorized(req, token)) return writeJson(res, 401, { error: 'Невірний код доступу до сервера завантаження.' });
 
   readJsonBody(req).then(async ({ videoId }) => {
     if (typeof videoId !== 'string' || !/^[\w-]{11}$/.test(videoId)) {
@@ -313,6 +447,8 @@ function handleHttps(req, res, token) {
     });
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/library') return requestLibraryList(req, res, token);
+  if (req.method === 'GET' && url.pathname === '/api/library/audio') return requestLibraryAudio(req, res, token, url);
   if (req.method === 'POST' && url.pathname === '/api/download') return requestDownload(req, res, token);
   if (url.pathname.startsWith('/api/')) return writeJson(res, 404, { error: 'Невідома дія сервера.' });
 
@@ -355,7 +491,7 @@ function handleSetup(req, res, profile, hostname, lanAddresses, token) {
   if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/install-ca.mobileconfig') {
     res.writeHead(200, {
       'Content-Type': 'application/x-apple-aspen-config',
-      'Content-Disposition': 'attachment; filename="Muzika-Local-Audio-CA.mobileconfig"',
+      'Content-Disposition': 'attachment; filename="iPod-Local-Audio-CA.mobileconfig"',
       'Cache-Control': 'no-store'
     });
     return req.method === 'HEAD' ? res.end() : res.end(profile);
@@ -373,7 +509,7 @@ function handleSetup(req, res, profile, hostname, lanAddresses, token) {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
   if (!secure) {
     const secureSetupUrl = `${apiOrigin}/setup`;
-    return res.end(`<!doctype html><html lang="uk"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>Muzika — підключення</title><main style="font:17px/1.5 system-ui,-apple-system,sans-serif;max-width:42rem;margin:2rem auto;padding:0 1rem;color:#222"><h1>Muzika: завантаження на iPhone</h1><p><strong>Під’єднайте iPhone і Mac до однієї мережі Wi‑Fi.</strong> Через 5G телефон не зможе під’єднатися до Mac.</p><ol><li><a href="/install-ca.mobileconfig">Завантажте та встановіть профіль сертифіката Muzika.</a></li><li>У «Параметри» → «Загальні» → «Про пристрій» → «Параметри довіри сертифікатам» (Certificate Trust Settings) увімкніть повну довіру до «Muzika Local Audio CA».</li><li>Після цього відкрийте <a href="${secureSetupUrl}">захищену сторінку продовження</a>.</li></ol><p>Профіль довіри й посилання підключення працюватимуть лише з цим Mac у тій самій Wi‑Fi мережі.</p></main></html>`);
+    return res.end(`<!doctype html><html lang="uk"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>iPod — підключення</title><main style="font:17px/1.5 system-ui,-apple-system,sans-serif;max-width:42rem;margin:2rem auto;padding:0 1rem;color:#222"><h1>iPod: передавання музики на iPhone</h1><p><strong>Під’єднайте iPhone і Mac до однієї мережі Wi‑Fi.</strong> Через 5G телефон не зможе під’єднатися до Mac.</p><ol><li><a href="/install-ca.mobileconfig">Завантажте та встановіть профіль сертифіката iPod.</a></li><li>У «Параметри» → «Загальні» → «Про пристрій» → «Параметри довіри сертифікатам» (Certificate Trust Settings) увімкніть повну довіру до «iPod Local Audio CA».</li><li>Після цього відкрийте <a href="${secureSetupUrl}">захищену сторінку продовження</a>.</li></ol><p>Профіль довіри й посилання підключення працюватимуть лише з цим Mac у тій самій Wi‑Fi мережі.</p></main></html>`);
   }
 
   const pwaUrl = new URL('https://kiorpavlo-cmd.github.io/muzika-offline/');
@@ -382,7 +518,7 @@ function handleSetup(req, res, profile, hostname, lanAddresses, token) {
     'muzika-download-token': token
   }).toString();
   const appUrl = pwaUrl.href.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-  res.end(`<!doctype html><html lang="uk"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>Muzika — підключення</title><main style="font:17px/1.5 system-ui,-apple-system,sans-serif;max-width:42rem;margin:2rem auto;padding:0 1rem;color:#222"><h1>Muzika: підключення завершено</h1><p>Натисніть, щоб відкрити GitHub-версію Muzika з підключенням до локального сервера Mac:</p><p><a href="${appUrl}">Відкрити Muzika</a></p><p>Якщо посилання відкрило Safari, а ви користуєтеся застосунком з іконки на екрані «Домівка»: скопіюйте посилання вище, відкрийте Muzika з іконки → «Налаштування» → «Завантаження з Mac», вставте посилання та натисніть «Підключити сервер».</p><p>Залиште Muzika Server запущеним на Mac, поки триває завантаження. Після цього аудіо залишиться в медіатеці на iPhone і працюватиме офлайн.</p><p style="color:#666;font-size:14px">Адреса локального сервера: ${apiOrigin}</p></main></html>`);
+  res.end(`<!doctype html><html lang="uk"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>iPod — підключення</title><main style="font:17px/1.5 system-ui,-apple-system,sans-serif;max-width:42rem;margin:2rem auto;padding:0 1rem;color:#222"><h1>iPod: підключення завершено</h1><p>Натисніть, щоб відкрити GitHub-версію iPod з підключенням до локального сервера Mac:</p><p><a href="${appUrl}">Відкрити iPod</a></p><p>Якщо посилання відкрило Safari, а ви користуєтеся застосунком з іконки на екрані «Домівка»: скопіюйте посилання вище, відкрийте iPod з іконки → «Налаштування» → «Завантаження з Mac», вставте посилання та натисніть «Підключити сервер».</p><p>Залиште сервер iPod запущеним на Mac, поки триває завантаження. Після цього аудіо залишиться в медіатеці на iPhone і працюватиме офлайн.</p><p style="color:#666;font-size:14px">Адреса локального сервера: ${apiOrigin}</p></main></html>`);
 }
 
 function main() {
@@ -402,7 +538,7 @@ function main() {
   });
   secureServer.on('error', (error) => console.error(`Не вдалося відкрити HTTPS-порт ${HTTPS_PORT}: ${error.message}`));
   secureServer.listen(HTTPS_PORT, HOST, () => {
-      console.log(`Налаштування Muzika: https://${certs.hostname}:${HTTPS_PORT}/setup`);
+      console.log(`Налаштування iPod: https://${certs.hostname}:${HTTPS_PORT}/setup`);
       for (const address of certs.lanAddresses) {
         console.log(`Налаштування iPhone у Wi-Fi: https://${address}:${HTTPS_PORT}/setup`);
         console.log(`Початкова сторінка iPhone: http://${address}:${HTTP_PORT}/`);

@@ -8,7 +8,7 @@
     <meta name="google-client-id" content="911469273892-hr4arur7kth3pjor37djpvp9fsduk6k1.apps.googleusercontent.com">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
-    <title>Music</title>
+    <title>iPod</title>
     <link rel="manifest" href="./manifest.webmanifest">
     <link rel="icon" href="./assets/icon.png" type="image/png">
     <link rel="apple-touch-icon" href="./assets/icon.png">
@@ -46,6 +46,7 @@
       <div id="toast" class="toast" role="status" aria-live="polite"></div>
       <div id="modal-root"></div>
       <div id="player-root"></div>
+      <input id="audio-file-input" type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.aiff" multiple hidden>
       <audio id="audio-element" preload="metadata"></audio>
     </div>
     <script src="./app.js" defer></script>

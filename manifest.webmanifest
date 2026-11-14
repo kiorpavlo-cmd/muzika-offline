@@ -1,6 +1,6 @@
 {
-  "name": "Music",
-  "short_name": "Music",
+  "name": "iPod",
+  "short_name": "iPod",
   "description": "Ваша музика завжди під рукою, навіть без інтернету.",
   "lang": "uk",
   "start_url": "./",
@@ -10,6 +10,11 @@
   "theme_color": "#000000",
   "orientation": "portrait-primary",
   "icons": [
-    { "src": "./assets/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+    {
+      "src": "./assets/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
   ]
 }
