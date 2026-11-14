@@ -118,6 +118,8 @@ let youtubeSearchTimer = null;
 let youtubeSearchController = null;
 let youtubeSearchRequestId = 0;
 let macSyncAbortController = null;
+let macSyncConnectionTimer = null;
+let macSyncConnectionController = null;
 let macSyncWakeLock = null;
 let macSyncWakeLockRequest = null;
 let macSyncWakeLockWanted = false;
@@ -196,10 +198,59 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+function setMacSyncConnection(state, label) {
+  const indicator = $('#mac-sync-connection');
+  if (!indicator) return;
+  indicator.dataset.state = state;
+  const text = $('span', indicator);
+  if (text) text.textContent = label;
+}
+
+async function checkMacSyncConnection(config, parentSignal) {
+  if (parentSignal?.aborted) return false;
+  const controller = new AbortController();
+  macSyncConnectionController = controller;
+  const timeout = setTimeout(() => controller.abort(), 4500);
+  const onAbort = () => controller.abort();
+  parentSignal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    const response = await fetch(config.server + '/api/health?sync_ping=' + Date.now(), {
+      cache: 'no-store',
+      signal: controller.signal
+    });
+    const payload = await response.json();
+    if (!response.ok || payload.ok !== true) throw new Error('Mac server unavailable');
+    if (!parentSignal?.aborted) setMacSyncConnection('connected', 'Подключено к Mac');
+    return true;
+  } catch {
+    if (!parentSignal?.aborted) setMacSyncConnection('disconnected', 'Нет соединения с Mac');
+    return false;
+  } finally {
+    clearTimeout(timeout);
+    parentSignal?.removeEventListener('abort', onAbort);
+    if (macSyncConnectionController === controller) macSyncConnectionController = null;
+  }
+}
+
+function stopMacSyncConnectionMonitor() {
+  if (macSyncConnectionTimer) clearInterval(macSyncConnectionTimer);
+  macSyncConnectionTimer = null;
+  macSyncConnectionController?.abort();
+  macSyncConnectionController = null;
+}
+
+function startMacSyncConnectionMonitor(config, signal) {
+  stopMacSyncConnectionMonitor();
+  macSyncConnectionTimer = setInterval(() => {
+    checkMacSyncConnection(config, signal);
+  }, 5000);
+}
+
 async function openMacSync() {
   const config = downloadServerConfig();
   const root = $('#modal-root');
   if (!config) return notify('Спочатку підключіть iPod на Mac у налаштуваннях.');
+  stopMacSyncConnectionMonitor();
   macSyncAbortController?.abort();
   const controller = new AbortController();
   macSyncAbortController = controller;
@@ -213,9 +264,12 @@ async function openMacSync() {
     if (count) count.textContent = String(Math.floor(elapsed / 60)).padStart(2, '0') + ':' + String(elapsed % 60).padStart(2, '0');
     if (detail) detail.textContent = 'Mac формує список медіатеки…' + (listScreenKeptAwake ? ' · Автоблокування вимкнено' : '');
   }, 1000);
-  root.innerHTML = '<div class="action-modal mac-sync-modal"><section class="mac-sync-sheet" role="dialog" aria-modal="true" aria-labelledby="mac-sync-title"><header><div><h2 id="mac-sync-title">Синхронізація з Mac</h2><p id="mac-sync-status">Отримую список пісень…</p></div><button data-action="close-mac-sync" aria-label="Закрити">×</button></header><div id="mac-sync-progress" class="mac-sync-progress" aria-live="polite"><div class="mac-sync-progress-heading"><strong id="mac-sync-current-title">Підключаюся до Mac…</strong><span id="mac-sync-progress-count">Очікування</span></div><div class="mac-sync-progress-track is-indeterminate" role="progressbar" aria-label="Прогрес синхронізації" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Отримую список пісень"><span id="mac-sync-progress-fill"></span></div><small id="mac-sync-progress-detail">Отримую список пісень…</small></div><div id="mac-sync-list" class="mac-sync-list"><div class="empty-state">Підключення…</div></div><footer><button data-action="close-mac-sync">Закрити</button><button data-action="mac-sync-download" disabled>Завантажити вибрані</button></footer></section></div>';
+  root.innerHTML = '<div class="action-modal mac-sync-modal"><section class="mac-sync-sheet" role="dialog" aria-modal="true" aria-labelledby="mac-sync-title"><header><div><h2 id="mac-sync-title">Синхронізація з Mac</h2><div id="mac-sync-connection" class="mac-sync-connection" data-state="checking"><i></i><span>Перевіряю зв’язок…</span></div><p id="mac-sync-status">Отримую список пісень…</p></div><button data-action="close-mac-sync" aria-label="Закрити">×</button></header><div id="mac-sync-progress" class="mac-sync-progress" aria-live="polite"><div class="mac-sync-progress-heading"><strong id="mac-sync-current-title">Підключаюся до Mac…</strong><span id="mac-sync-progress-count">Очікування</span></div><div class="mac-sync-progress-track is-indeterminate" role="progressbar" aria-label="Прогрес синхронізації" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Отримую список пісень"><span id="mac-sync-progress-fill"></span></div><small id="mac-sync-progress-detail">Отримую список пісень…</small></div><div id="mac-sync-list" class="mac-sync-list"><div class="empty-state">Підключення…</div></div><footer><button data-action="close-mac-sync">Закрити</button><button data-action="mac-sync-download" disabled>Завантажити вибрані</button></footer></section></div>';
   const listScreenKeptAwake = await holdMacSyncScreenAwake();
   try {
+    const connected = await checkMacSyncConnection(config, controller.signal);
+    startMacSyncConnectionMonitor(config, controller.signal);
+    if (!connected) throw new Error('Нет соединения с Mac. Проверьте, что iPhone использует правильный адрес Mac и подключён к его сети Wi‑Fi.');
     const response = await fetch(config.server + '/api/library', { headers: { Authorization: 'Bearer ' + config.token }, signal: controller.signal });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'Не вдалося підключитися до Mac.');
@@ -368,7 +422,10 @@ async function syncSelectedMacTracks() {
   }
   if (controller.signal.aborted) return;
   window.__ipodSyncMetadata = null;
-  if (root.contains(sheet)) root.innerHTML = '';
+  if (root.contains(sheet)) {
+    root.innerHTML = '';
+    stopMacSyncConnectionMonitor();
+  }
   render();
   notify(failed ? 'Синхронізацію завершено. Помилок: ' + failed + '.' : 'Синхронізовано пісень: ' + completed + '.');
 }
@@ -2015,7 +2072,7 @@ document.addEventListener('click', async (event) => {
     case 'youtube-download-placeholder': await downloadYouTubeAudio(id); break;
     case 'mac-sync': await openMacSync(); break;
     case 'mac-sync-download': await syncSelectedMacTracks(); break;
-    case 'close-mac-sync': macSyncAbortController?.abort(); macSyncAbortController = null; releaseMacSyncScreenWakeLock(); $('#modal-root').innerHTML = ''; break;
+    case 'close-mac-sync': macSyncAbortController?.abort(); macSyncAbortController = null; stopMacSyncConnectionMonitor(); releaseMacSyncScreenWakeLock(); $('#modal-root').innerHTML = ''; break;
     case 'import-audio':
       $('#audio-file-input')?.click();
       break;
