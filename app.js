@@ -117,6 +117,7 @@ const state = {
 let youtubeSearchTimer = null;
 let youtubeSearchController = null;
 let youtubeSearchRequestId = 0;
+let macSyncAbortController = null;
 
 function readDownloadServerFromHash() {
   if (!location.hash) return null;
@@ -154,7 +155,7 @@ async function openMacSync() {
   const config = downloadServerConfig();
   const root = $('#modal-root');
   if (!config) return notify('Спочатку підключіть iPod на Mac у налаштуваннях.');
-  root.innerHTML = '<div class="action-modal mac-sync-modal"><section class="mac-sync-sheet" role="dialog" aria-modal="true" aria-labelledby="mac-sync-title"><header><div><h2 id="mac-sync-title">Синхронізація з Mac</h2><p id="mac-sync-status">Отримую список пісень…</p></div><button data-action="close-mac-sync" aria-label="Закрити">×</button></header><div id="mac-sync-list" class="mac-sync-list"><div class="empty-state">Підключення…</div></div><footer><button data-action="close-mac-sync">Закрити</button><button data-action="mac-sync-download" disabled>Завантажити вибрані</button></footer></section></div>';
+  root.innerHTML = '<div class="action-modal mac-sync-modal"><section class="mac-sync-sheet" role="dialog" aria-modal="true" aria-labelledby="mac-sync-title"><header><div><h2 id="mac-sync-title">Синхронізація з Mac</h2><p id="mac-sync-status">Отримую список пісень…</p></div><button data-action="close-mac-sync" aria-label="Закрити">×</button></header><div id="mac-sync-progress" class="mac-sync-progress" hidden aria-live="polite"><div class="mac-sync-progress-heading"><strong id="mac-sync-current-title"></strong><span id="mac-sync-progress-count"></span></div><div class="mac-sync-progress-track" role="progressbar" aria-label="Прогрес синхронізації" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="mac-sync-progress-fill"></span></div><small id="mac-sync-progress-detail"></small></div><div id="mac-sync-list" class="mac-sync-list"><div class="empty-state">Підключення…</div></div><footer><button data-action="close-mac-sync">Закрити</button><button data-action="mac-sync-download" disabled>Завантажити вибрані</button></footer></section></div>';
   try {
     const response = await fetch(config.server + '/api/library', { headers: { Authorization: 'Bearer ' + config.token } });
     const payload = await response.json();
@@ -199,43 +200,99 @@ async function syncSelectedMacTracks() {
   if (!selectedIds.length) return notify('Позначте пісні для синхронізації.');
   const status = $('#mac-sync-status');
   const button = $('[data-action="mac-sync-download"]', root);
+  const progress = $('#mac-sync-progress', root);
+  const currentTitle = $('#mac-sync-current-title', root);
+  const progressCount = $('#mac-sync-progress-count', root);
+  const progressDetail = $('#mac-sync-progress-detail', root);
+  const progressTrack = $('.mac-sync-progress-track', root);
+  const progressFill = $('#mac-sync-progress-fill', root);
+  const sheet = $('.mac-sync-sheet', root);
+  const controller = new AbortController();
+  macSyncAbortController = controller;
   button.disabled = true;
+  button.textContent = 'Завантаження…';
+  progress.hidden = false;
+  root.querySelectorAll('[data-mac-track]').forEach((input) => { input.disabled = true; });
   let completed = 0;
   let failed = 0;
-  for (const id of selectedIds) {
-    try {
-      const remote = await fetch(config.server + '/api/library/audio?id=' + encodeURIComponent(id), {
-        headers: { Authorization: 'Bearer ' + config.token }
-      });
-      if (!remote.ok) throw new Error('download-failed');
-      const blob = await remote.blob();
+  const updateProgress = (index, loaded, expected, title, artist) => {
+    const trackFraction = expected > 0 ? Math.min(loaded / expected, 1) : 0;
+    const value = Math.min(100, Math.round(((index + trackFraction) / selectedIds.length) * 100));
+    currentTitle.textContent = 'Зараз: ' + (title || 'Без назви') + (artist ? ' — ' + artist : '');
+    progressCount.textContent = 'Пісня ' + (index + 1) + ' з ' + selectedIds.length;
+    progressDetail.textContent = expected > 0
+      ? value + '% · ' + formatSyncSize(loaded) + ' з ' + formatSyncSize(expected)
+      : value + '% · завантажено ' + formatSyncSize(loaded);
+    progressTrack.setAttribute('aria-valuenow', String(value));
+    progressFill.style.width = value + '%';
+    if (status) status.textContent = 'Синхронізую пісню ' + (index + 1) + ' з ' + selectedIds.length + '…';
+  };
+  try {
+    for (const [index, id] of selectedIds.entries()) {
+      if (controller.signal.aborted) break;
       const metadata = window.__ipodSyncMetadata?.[id] || {};
-      const file = new File([blob], metadata.file || 'iPod audio', { type: blob.type || 'audio/mpeg' });
-      const track = {
-        id: 'mac-' + id,
-        title: metadata.title || file.name.replace(/\.[^.]+$/, ''),
-        artist: metadata.artist || '',
-        album: metadata.album || '',
-        year: metadata.year || '',
-        genre: metadata.genre || '',
-        art: ['local', 'violet', 'blue', 'rose'][state.localTracks.length % 4],
-        local: true,
-        file,
-        syncMtime: metadata.mtime || 0,
-        syncSize: metadata.size || blob.size
-      };
-      await database.add(track);
-      const oldIndex = state.localTracks.findIndex((item) => item.id === track.id);
-      if (oldIndex >= 0) state.localTracks[oldIndex] = track;
-      else state.localTracks.push(track);
-    } catch {
-      failed += 1;
+      const title = metadata.title || metadata.file || 'Без назви';
+      const expectedByMetadata = Number(metadata.size) || 0;
+      let saved = false;
+      updateProgress(index, 0, expectedByMetadata, title, metadata.artist || '');
+      try {
+        const remote = await fetch(config.server + '/api/library/audio?id=' + encodeURIComponent(id), {
+          headers: { Authorization: 'Bearer ' + config.token },
+          signal: controller.signal
+        });
+        if (!remote.ok) throw new Error('download-failed');
+        const expected = Number(remote.headers.get('Content-Length')) || expectedByMetadata;
+        let blob;
+        if (remote.body?.getReader) {
+          const reader = remote.body.getReader();
+          const chunks = [];
+          let loaded = 0;
+          while (true) {
+            const part = await reader.read();
+            if (part.done) break;
+            chunks.push(part.value);
+            loaded += part.value.byteLength;
+            updateProgress(index, loaded, expected, title, metadata.artist || '');
+          }
+          blob = new Blob(chunks, { type: remote.headers.get('Content-Type') || 'audio/mpeg' });
+        } else {
+          blob = await remote.blob();
+          updateProgress(index, blob.size, expected, title, metadata.artist || '');
+        }
+        if (controller.signal.aborted) break;
+        const file = new File([blob], metadata.file || 'iPod audio', { type: blob.type || 'audio/mpeg' });
+        const track = {
+          id: 'mac-' + id,
+          title: metadata.title || file.name.replace(/\.[^.]+$/, ''),
+          artist: metadata.artist || '',
+          album: metadata.album || '',
+          year: metadata.year || '',
+          genre: metadata.genre || '',
+          art: ['local', 'violet', 'blue', 'rose'][state.localTracks.length % 4],
+          local: true,
+          file,
+          syncMtime: metadata.mtime || 0,
+          syncSize: metadata.size || blob.size
+        };
+        await database.add(track);
+        const oldIndex = state.localTracks.findIndex((item) => item.id === track.id);
+        if (oldIndex >= 0) state.localTracks[oldIndex] = track;
+        else state.localTracks.push(track);
+        saved = true;
+      } catch {
+        if (controller.signal.aborted) break;
+        failed += 1;
+      }
+      completed += 1;
+      updateProgress(index, Number(metadata.size) || 1, Number(metadata.size) || 1, title, metadata.artist || '');
+      progressDetail.textContent = (saved ? 'Збережено' : 'Не вдалося завантажити') + ' · Опрацьовано ' + completed + ' з ' + selectedIds.length + ' пісень';
     }
-    completed += 1;
-    if (status) status.textContent = 'Синхронізовано ' + completed + ' з ' + selectedIds.length + (failed ? ' · помилок: ' + failed : '');
+  } finally {
+    if (macSyncAbortController === controller) macSyncAbortController = null;
   }
+  if (controller.signal.aborted) return;
   window.__ipodSyncMetadata = null;
-  root.innerHTML = '';
+  if (root.contains(sheet)) root.innerHTML = '';
   render();
   notify(failed ? 'Синхронізацію завершено. Помилок: ' + failed + '.' : 'Синхронізовано пісень: ' + completed + '.');
 }
@@ -1882,7 +1939,7 @@ document.addEventListener('click', async (event) => {
     case 'youtube-download-placeholder': await downloadYouTubeAudio(id); break;
     case 'mac-sync': await openMacSync(); break;
     case 'mac-sync-download': await syncSelectedMacTracks(); break;
-    case 'close-mac-sync': $('#modal-root').innerHTML = ''; break;
+    case 'close-mac-sync': macSyncAbortController?.abort(); macSyncAbortController = null; $('#modal-root').innerHTML = ''; break;
     case 'import-audio':
       $('#audio-file-input')?.click();
       break;
