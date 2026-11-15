@@ -39,13 +39,18 @@ const database = (() => {
 
 const artworkObjectUrls = new Map();
 const artworkExtractions = new Map();
+const artworkExtractionQueue = [];
 const MAX_EMBEDDED_ARTWORK_SIZE = 8 * 1024 * 1024;
+const ARTWORK_EXTRACTION_VERSION = 2;
+let activeArtworkExtractions = 0;
 
 function imageMimeFromBytes(bytes, fallback = '') {
   if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
   if (bytes.length >= 6 && String.fromCharCode(...bytes.subarray(0, 6)).startsWith('GIF8')) return 'image/gif';
   if (bytes.length >= 12 && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.subarray(8, 12)) === 'WEBP') return 'image/webp';
+  if (bytes.length >= 12 && String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp' && /^(avif|avis)$/.test(String.fromCharCode(...bytes.subarray(8, 12)))) return 'image/avif';
+  if (/^image\/(png|jpeg|gif|webp)$/i.test(fallback)) return '';
   return /^image\/(png|jpeg|gif|webp|avif)$/i.test(fallback) ? fallback : '';
 }
 
@@ -99,9 +104,10 @@ function parseId3PictureFrame(frame, version) {
     offset = mimeEnd + 1;
     pictureType = frame[offset++];
   }
-  const terminator = encoding === 1 || encoding === 2 ? [0, 0] : [0];
+  const utf16Description = encoding === 1 || encoding === 2;
+  const terminator = utf16Description ? [0, 0] : [0];
   let descriptionEnd = -1;
-  for (let index = offset; index <= frame.length - terminator.length; index += 1) {
+  for (let index = offset; index <= frame.length - terminator.length; index += utf16Description ? 2 : 1) {
     if (terminator.every((byte, part) => frame[index + part] === byte)) { descriptionEnd = index; break; }
   }
   if (descriptionEnd < 0) return null;
@@ -273,16 +279,30 @@ function patchTrackArtwork(track) {
 }
 
 function scheduleArtworkExtraction(track) {
-  if (!track?.file || track.artworkChecked || artworkExtractions.has(track.id)) return;
-  const extraction = (async () => {
-    const artwork = await readEmbeddedArtwork(track.file);
-    const updated = { ...track, artwork: artwork || undefined, artworkChecked: true };
-    await database.add(updated).catch(() => {});
-    const index = state.localTracks.findIndex((item) => item.id === track.id);
-    if (index >= 0) state.localTracks[index] = updated;
-    if (artwork) patchTrackArtwork(updated);
-  })().finally(() => artworkExtractions.delete(track.id));
+  if (!track?.file || track.artworkExtractionVersion === ARTWORK_EXTRACTION_VERSION || artworkExtractions.has(track.id)) return;
+  const extraction = new Promise((resolve) => artworkExtractionQueue.push({ track, resolve }));
   artworkExtractions.set(track.id, extraction);
+  processArtworkExtractionQueue();
+}
+
+function processArtworkExtractionQueue() {
+  if (activeArtworkExtractions >= 3) return;
+  const task = artworkExtractionQueue.shift();
+  if (!task) return;
+  activeArtworkExtractions += 1;
+  void (async () => {
+    const artwork = await readEmbeddedArtwork(task.track.file);
+    const updated = { ...task.track, artwork: artwork || undefined, artworkChecked: true, artworkExtractionVersion: ARTWORK_EXTRACTION_VERSION };
+    await database.add(updated).catch(() => {});
+    const index = state.localTracks.findIndex((item) => item.id === task.track.id);
+    if (index >= 0) state.localTracks[index] = updated;
+    patchTrackArtwork(updated);
+  })().catch(() => {}).finally(() => {
+    activeArtworkExtractions -= 1;
+    artworkExtractions.delete(task.track.id);
+    task.resolve();
+    processArtworkExtractionQueue();
+  });
 }
 
 const icons = {
@@ -1001,10 +1021,10 @@ function artMarkup(artOrTrack, label, extra = '') {
   const trackAttributes = track?.id
     ? ` data-artwork-track-id="${safeText(track.id)}" data-artwork-label="${safeText(title)}" data-artwork-class="${safeText(extra)}"`
     : '';
+  if (track?.file && track.artworkExtractionVersion !== ARTWORK_EXTRACTION_VERSION) scheduleArtworkExtraction(track);
   if (track?.artwork instanceof Blob) {
     return `<div class="artwork artwork--photo ${extra}"${trackAttributes} aria-hidden="true"><img class="artwork-image" src="${safeText(artworkObjectUrl(track))}" alt=""></div>`;
   }
-  if (track?.file && !track.artworkChecked) scheduleArtworkExtraction(track);
   return `<div class="artwork artwork--generated ${extra}" style="--art-a:${start};--art-b:${end};--art-c:${accent}"${trackAttributes} aria-hidden="true"><span class="artwork-monogram">${safeText(monogram)}</span><span class="artwork-caption">${safeText(title)}</span></div>`;
 }
 
