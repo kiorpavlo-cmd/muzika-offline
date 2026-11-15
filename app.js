@@ -1175,6 +1175,21 @@ async function playNextTrack() {
   await playTrack(list[(index + 1) % list.length] || list[0]);
 }
 
+function audioBlobForPlayback(file) {
+  const mimeByExtension = {
+    mp3: 'audio/mpeg', mpga: 'audio/mpeg', m4a: 'audio/mp4', mp4: 'audio/mp4',
+    aac: 'audio/aac', wav: 'audio/wav', wave: 'audio/wav', flac: 'audio/flac',
+    ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', aiff: 'audio/aiff', aif: 'audio/aiff',
+    caf: 'audio/x-caf', wma: 'audio/x-ms-wma', ape: 'audio/ape', wv: 'audio/wavpack',
+    mpc: 'audio/x-musepack', tta: 'audio/x-tta'
+  };
+  if (!file) return file;
+  if (String(file.type || '').toLowerCase().startsWith('audio/')) return file;
+  const extension = String(file.name || '').match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+  const mime = mimeByExtension[extension];
+  return mime ? new Blob([file], { type: mime }) : file;
+}
+
 async function playPreviousTrack(forceTrackChange = false) {
   if (!forceTrackChange && currentTrack()?.local && audio.currentTime > 3) {
     audio.currentTime = 0;
@@ -2291,12 +2306,15 @@ appShell.addEventListener('pointercancel', (event) => {
   else backGesture = null;
 });
 
+let playRequestSequence = 0;
+
 async function playTrack(track) {
   if (!track) return;
   if (!track.local) {
     notify('Додайте свій аудіофайл, щоб слухати його офлайн.');
     return;
   }
+  const playRequest = ++playRequestSequence;
   if (state.currentTrackId === track.id && state.isPlaying) {
     audio.pause();
     state.isPlaying = false;
@@ -2305,11 +2323,16 @@ async function playTrack(track) {
     return;
   }
   if (state.currentTrackId !== track.id || !state.audioUrl) {
+    const previousUrl = state.audioUrl;
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
     state.currentTrackId = track.id;
     syncNowPlayingTrack();
-    if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
-    state.audioUrl = URL.createObjectURL(track.file);
+    state.audioUrl = URL.createObjectURL(audioBlobForPlayback(track.file));
     audio.src = state.audioUrl;
+    audio.load();
+    if (previousUrl) URL.revokeObjectURL(previousUrl);
   } else if (audio.ended) {
     audio.currentTime = 0;
   }
@@ -2317,11 +2340,14 @@ async function playTrack(track) {
   localStorage.setItem('muzika-recent-tracks', JSON.stringify(state.recentTrackIds));
   try {
     await audio.play();
+    if (playRequest !== playRequestSequence || currentTrack()?.id !== track.id) return;
     state.isPlaying = true;
     renderPlayer();
-  } catch {
+  } catch (error) {
+    if (playRequest !== playRequestSequence || currentTrack()?.id !== track.id || error?.name === 'AbortError') return;
     state.isPlaying = false;
-    notify('Не вдалося відтворити цей файл.');
+    const unsupported = error?.name === 'NotSupportedError' || audio.error?.code === 4;
+    notify(unsupported ? 'Формат цього аудіофайлу не підтримується Safari.' : 'Не вдалося відтворити цей файл.');
     renderPlayer();
   }
 }
@@ -2873,11 +2899,13 @@ audio.addEventListener('volumechange', () => {
   volume.style.setProperty('--range-progress', `${audio.volume * 100}%`);
 });
 audio.addEventListener('play', () => {
+  if (audio.paused) return;
   state.isPlaying = true;
   renderPlayer();
   syncNowPlayingPlayback();
 });
 audio.addEventListener('pause', () => {
+  if (!audio.paused) return;
   state.isPlaying = false;
   renderPlayer();
   syncNowPlayingPlayback();
