@@ -1,6 +1,8 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const content = $('#content');
 const audio = $('#audio-element');
+let screenTransition = '';
+let screenTransitionTimer = null;
 
 const database = (() => {
   let connection;
@@ -734,11 +736,23 @@ function profileButtonMarkup() {
 }
 
 function artMarkup(art, label, extra = '') {
-  return `<div class="artwork artwork--local ${extra}" aria-hidden="true">${icon('music', 'artwork-music')}</div>`;
+  const palettes = [
+    ['#ba5147', '#3e1d30', '#ffbd78'], ['#d17b31', '#432039', '#ffd36b'],
+    ['#426fbd', '#19294b', '#9fd7ff'], ['#7b65b8', '#292044', '#e0a9ff'],
+    ['#298673', '#16343b', '#a2e6c4'], ['#bc4165', '#391c3c', '#ffb4a3'],
+    ['#a38a3d', '#34251c', '#f7d56a'], ['#56818c', '#1c303b', '#a7e5e6']
+  ];
+  const title = String(label || '').trim() || 'Музика';
+  let hash = 2166136261;
+  for (let index = 0; index < title.length; index += 1) hash = Math.imul(hash ^ title.charCodeAt(index), 16777619);
+  const [start, end, accent] = palettes[(hash >>> 0) % palettes.length];
+  const words = title.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const monogram = words.slice(0, 2).map((word) => Array.from(word)[0]).join('').toLocaleUpperCase('uk') || '♫';
+  return `<div class="artwork artwork--generated ${extra}" style="--art-a:${start};--art-b:${end};--art-c:${accent}" aria-hidden="true"><span class="artwork-monogram">${safeText(monogram)}</span><span class="artwork-caption">${safeText(title)}</span></div>`;
 }
 
 function currentTrack() {
-  return allTracks().find((track) => track.id === state.currentTrackId) || allTracks()[0] || null;
+  return allTracks().find((track) => track.id === state.currentTrackId) || null;
 }
 
 function allTracks() {
@@ -787,7 +801,7 @@ function songRow(track, index, options = {}) {
   const playing = state.currentTrackId === track.id && state.isPlaying;
   return `<div class="song-row" data-song-index="${index}">
     ${options.leadingFavorite ? `<span class="song-leading-favorite" aria-hidden="true">${favorite ? '★' : ''}</span>` : ''}
-    ${artMarkup(track.art, track.album, 'song-art')}
+    ${artMarkup(track.art, track.album || track.title, 'song-art')}
     <button class="song-main" data-action="play-track" data-id="${safeText(track.id)}" aria-label="Відтворити ${safeText(track.title)}">
       <span class="song-title">${safeText(track.title)}</span><span class="song-artist">${safeText(track.artist)}${options.showAlbum ? ` · ${safeText(track.album)}` : ''}</span>
     </button>
@@ -938,42 +952,33 @@ function renderHome() {
       <div class="favorite-art">${icon('star')}</div><span class="feature-kicker">Ваша медіатека</span><strong>Улюблені пісні</strong><span>${favoriteCount} ${favoriteCount === 1 ? 'пісня' : 'пісень'}</span>
     </button>
   </div>` : '';
-  const recentSection = recentlyPlayed.length ? `${sectionHeading('Недавно прослухані', 'Усі', 'recent')}<div class="song-list">${recentlyPlayed.slice(0, 5).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : '';
-  const librarySection = recentlyAdded.length ? `${sectionHeading('Недавно додані')}<div class="song-list">${recentlyAdded.map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : `<div class="empty-state empty-state--home">${icon('music')}<strong>Ваша медіатека порожня</strong></div>`;
+  const recentSection = recentlyPlayed.length ? `${sectionHeading('Нещодавно слухали', 'Усі', 'recent')}<div class="recent-card-strip">${recentlyPlayed.slice(0, 6).map((track) => `<button class="recent-listen-card" data-action="play-track" data-id="${safeText(track.id)}">${artMarkup(track.art, track.album || track.title, 'recent-listen-art')}<strong>${safeText(track.title)}</strong><small>${safeText(track.artist)}</small></button>`).join('')}</div>` : '';
+  const librarySection = recentlyAdded.length ? `${sectionHeading('Недавно додані', 'Усі', 'all-albums')}<div class="song-list">${recentlyAdded.map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : '';
   const quickSyncAction = downloadServerConfig()
-    ? '<button class="settings-action-card mac-sync-library-action" data-action="mac-sync">' + icon('download') + '<span><strong>Синхронизировать новые песни с Mac</strong><small>Новые и изменённые песни будут отмечены автоматически</small></span></button>'
-    : '<button class="settings-action-card mac-sync-library-action" data-action="connect-mac-clipboard">' + icon('download') + '<span><strong>Подключить Mac с буфера обмена</strong><small>Скопируйте ссылку синхронизации на Mac</small></span></button>';
-  const quickImportAction = '<button class="settings-action-card" data-action="import-audio">' + icon('plus') + '<span><strong>Импортировать музыку из AirDrop или Файлов</strong><small>Выберите полученные аудиофайлы — они сохранятся офлайн</small></span></button>';
-  return `<header class="page-header page-header--home"><h1>Домівка</h1>${profileButtonMarkup()}</header>
-    <div class="library-import-card home-sync-actions">${quickSyncAction}${quickImportAction}</div>
-    ${favoritesSection}${recentSection}${librarySection}`;
-}
-
-function renderNew() {
-  return `<header class="page-header"><h1>Новинки</h1>${profileButtonMarkup()}</header>
-    <div class="empty-state">Онлайн-каталог новинок не підключено.</div>`;
-}
-
-function renderRadio() {
-  return `<header class="page-header"><h1>Радіо</h1>${profileButtonMarkup()}</header>
-    <div class="empty-state">Радіостанції поки недоступні.</div>`;
+    ? '<button class="settings-action-card mac-sync-library-action" data-action="mac-sync">' + icon('download') + '<span><strong>Синхронізувати з Mac</strong><small>Нові пісні з’являться у медіатеці</small></span></button>'
+    : '<button class="settings-action-card mac-sync-library-action" data-action="connect-mac-clipboard">' + icon('download') + '<span><strong>Під’єднати Mac</strong><small>Перенесіть музику з комп’ютера</small></span></button>';
+  const quickImportAction = '<button class="settings-action-card" data-action="import-audio">' + icon('plus') + '<span><strong>Додати музику</strong><small>Імпортуйте аудіофайли з Файлів або AirDrop</small></span></button>';
+  const emptyState = !recentlyAdded.length ? `<section class="home-empty-state"><div class="home-empty-art">${icon('music')}</div><h2>Ваша музика — поруч</h2><p>Додайте пісні з Файлів або перенесіть медіатеку з Mac. Збережена музика доступна офлайн.</p><div class="home-empty-actions">${quickImportAction}${quickSyncAction}</div></section>` : '';
+  return `<header class="page-header page-header--home"><div><p class="page-kicker">IPOD · ВАША МУЗИКА</p><h1>Слухати</h1></div>${profileButtonMarkup()}</header>
+    ${emptyState}${recentSection}${favoritesSection}${librarySection}`;
 }
 
 function renderLibrary() {
-  const categories = Object.entries(categoryInfo).map(([key, [title, iconName]]) => `<button class="category-row" data-action="category" data-category="${key}">${icon(iconName)}<span>${title}</span>${icon('back', 'chevron')}</button>`).join('');
+  const categoryCounts = { playlists: state.favorites.length + state.youtubeFavorites.length, artists: libraryArtists().length, albums: libraryAlbums().length, songs: allTracks().length, downloaded: allTracks().length };
+  const categories = Object.entries(categoryInfo).map(([key, [title, iconName]]) => `<button class="category-row" data-action="category" data-category="${key}">${icon(iconName)}<span>${title}</span><small>${categoryCounts[key] || 0}</small>${icon('back', 'chevron')}</button>`).join('');
   const added = [...allTracks()].reverse();
   const macSyncCard = downloadServerConfig()
-    ? '<button class="settings-action-card mac-sync-library-action" data-action="mac-sync">' + icon('download') + '<span><strong>Синхронизировать новые песни с Mac</strong><small>Новые и изменённые песни будут отмечены автоматически</small></span></button>'
-    : '<button class="settings-action-card mac-sync-library-action" data-action="connect-mac-clipboard">' + icon('download') + '<span><strong>Подключить Mac с буфера обмена</strong><small>Скопируйте ссылку синхронизации на Mac</small></span></button>';
-  return `<header class="page-header page-header--library"><h1>Медіатека</h1>${profileButtonMarkup()}</header>
+    ? '<button class="settings-action-card mac-sync-library-action" data-action="mac-sync">' + icon('download') + '<span><strong>Синхронізувати з Mac</strong><small>Нові пісні з’являться у медіатеці</small></span></button>'
+    : '<button class="settings-action-card mac-sync-library-action" data-action="connect-mac-clipboard">' + icon('download') + '<span><strong>Під’єднати Mac</strong><small>Перенесіть музику з комп’ютера</small></span></button>';
+  return `<header class="page-header page-header--library"><div><p class="page-kicker">ОФЛАЙН-КОЛЕКЦІЯ</p><h1>Медіатека</h1></div><div class="page-header-actions"><button class="header-action" data-action="import-audio" aria-label="Додати музику">${icon('plus')}</button>${profileButtonMarkup()}</div></header>
     <div class="category-list">${categories}</div>
-    <div class="library-import-card">${macSyncCard}<button class="settings-action-card" data-action="import-audio">${icon('plus')}<span><strong>Импортировать музыку из AirDrop или Файлов</strong><small>Выберите полученные аудиофайлы — они сохранятся офлайн</small></span></button></div>
+    <div class="library-import-card">${macSyncCard}</div>
     ${added.length ? `${sectionHeading('Недавно додані', 'Усі', 'all-albums')}<div class="song-list">${added.slice(0, 8).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : ''}
     ${state.youtubeLibrary.length ? `${sectionHeading('Збережені з YouTube · онлайн')}<div class="song-list">${state.youtubeLibrary.map((item) => youtubeResultRow(item, { saved: true })).join('')}</div>` : ''}`;
 }
 
 function renderSearch() {
-  return `<header class="search-header"><div class="search-box">${icon('search')}<input id="search-input" type="search" placeholder="Виконавці, пісні, альбоми" value="${safeText(state.searchText)}" autocomplete="off"></div><button class="search-close" data-action="close-search" aria-label="Очистити пошук або закрити">${icon('close')}</button></header>
+  return `<header class="search-page-header"><h1>Пошук</h1><div class="search-header"><div class="search-box">${icon('search')}<input id="search-input" type="search" placeholder="Пісня, виконавець або альбом" aria-label="Пошук музики" value="${safeText(state.searchText)}" autocomplete="off"></div><button class="search-close" data-action="close-search" aria-label="Очистити пошук або закрити">${icon('close')}</button></div></header>
     <div id="search-body">${renderSearchBody()}</div>`;
 }
 
@@ -1464,22 +1469,30 @@ function renderScreen() {
     case 'settings': return renderSettings();
     case 'tab':
     default:
-      return ({ home: renderHome, new: renderNew, radio: renderRadio, library: renderLibrary, search: renderSearch }[state.screen.tab] || renderHome)();
+      return ({ home: renderHome, library: renderLibrary, search: renderSearch }[state.screen.tab] || renderHome)();
   }
 }
 
 function renderTabBar() {
   const tabs = [
-    ['home', 'Домівка', 'home'], ['new', 'Новинки', 'grid'], ['radio', 'Радіо', 'radio'], ['library', 'Медіатека', 'library'], ['search', 'Пошук', 'search']
+    ['home', 'Слухати', 'home'], ['library', 'Медіатека', 'library'], ['search', 'Пошук', 'search']
   ];
-  $('#tab-bar').innerHTML = tabs.map(([id, label, glyph]) => `<button class="tab-button ${state.tab === id ? 'active' : ''}" data-tab="${id}">${icon(glyph)}<span>${label}</span></button>`).join('');
+  $('#tab-bar').innerHTML = tabs.map(([id, label, glyph]) => {
+    const active = state.tab === id;
+    return `<button class="tab-button ${active ? 'active' : ''}" data-tab="${id}"${active ? ' aria-current="page"' : ''}>${icon(glyph)}<span>${label}</span></button>`;
+  }).join('');
 }
 
 function renderPlayer() {
   const track = currentTrack();
-  $('#mini-player').innerHTML = track
-    ? `<button class="player-track" data-action="now-playing">${artMarkup(track.art, track.album, 'player-art')}<span class="player-copy"><strong>${safeText(track.title)}</strong><small>${safeText(track.artist)}</small></span></button><button class="player-control" data-action="toggle-play" aria-label="${state.isPlaying ? 'Пауза' : 'Відтворити'}">${icon(state.isPlaying ? 'pause' : 'play')}</button><button class="player-control player-next" data-action="next-track" aria-label="Наступна пісня">${icon('next')}</button>`
-    : `<div class="player-track player-track--empty">${artMarkup('local', '', 'player-art')}<span class="player-copy"><strong>Нічого не відтворюється</strong><small>Офлайн-медіатека</small></span></div><button class="player-control" disabled aria-label="Немає пісень">${icon('play')}</button><button class="player-control player-next" disabled aria-label="Немає наступної пісні">${icon('next')}</button>`;
+  const player = $('#mini-player');
+  if (!track) {
+    player.hidden = true;
+    player.replaceChildren();
+    return;
+  }
+  player.hidden = false;
+  player.innerHTML = `<button class="player-track" data-action="now-playing">${artMarkup(track.art, track.album || track.title, 'player-art')}<span class="player-copy"><strong>${safeText(track.title)}</strong><small>${safeText(track.artist)}</small></span></button><button class="player-control" data-action="toggle-play" aria-label="${state.isPlaying ? 'Пауза' : 'Відтворити'}">${icon(state.isPlaying ? 'pause' : 'play')}</button><button class="player-control player-next" data-action="next-track" aria-label="Наступна пісня">${icon('next')}</button>`;
 }
 
 function formatPlayerTime(seconds) {
@@ -1502,7 +1515,7 @@ function renderNowPlayingScreen() {
         <button class="now-playing-more" data-action="player-queue" aria-label="Черга відтворення">${icon('more')}</button>
       </header>
       <div class="now-playing-content">
-        <div class="now-playing-art-wrap now-playing-drag-zone">${artMarkup(track.art, track.album, 'now-playing-art')}</div>
+        <div class="now-playing-art-wrap now-playing-drag-zone">${artMarkup(track.art, track.album || track.title, 'now-playing-art')}</div>
         <div class="now-playing-track-info">
           <div class="now-playing-copy"><strong>${safeText(track.title)}</strong><span>${safeText(track.artist)}</span></div>
           <button class="now-playing-favorite" data-action="toggle-player-favorite" aria-label="${state.favorites.includes(track.id) ? 'Вилучити з улюблених' : 'Додати до улюблених'}">${icon('star', state.favorites.includes(track.id) ? 'is-favorite' : '')}</button>
@@ -1519,7 +1532,6 @@ function renderNowPlayingScreen() {
         <div class="now-playing-volume-row"><span>${icon('volume')}</span><input id="player-volume" class="player-range player-volume" type="range" min="0" max="1" step="0.01" value="${audio.volume}" aria-label="Гучність" ${playable ? '' : 'disabled'}><span>${icon('volume', 'volume-high')}</span></div>
         <p class="now-playing-note ${playable ? 'now-playing-note--ready' : ''}">${playable ? 'Офлайн-аудіо збережено на цьому пристрої' : 'Додайте аудіофайл, щоб слухати офлайн'}</p>
       </div>
-      <div class="now-playing-home-indicator" aria-hidden="true"></div>
     </section>`;
 }
 
@@ -1771,7 +1783,16 @@ function attachNowPlayingDrag(screen) {
 }
 
 function render() {
+  const transition = screenTransition;
+  screenTransition = '';
+  clearTimeout(screenTransitionTimer);
+  content.classList.remove('content--screen-push', 'content--screen-pop', 'content--tab-change');
   content.innerHTML = renderScreen();
+  if (transition) {
+    const transitionClass = transition === 'tab-change' ? 'content--tab-change' : `content--screen-${transition}`;
+    content.classList.add(transitionClass);
+    screenTransitionTimer = window.setTimeout(() => content.classList.remove(transitionClass), 380);
+  }
   content.classList.toggle('content--category-screen', state.screen.type === 'category');
   content.classList.toggle('content--category-detail', state.screen.type === 'category' && ['songs', 'albums'].includes(state.screen.category));
   renderTabBar();
@@ -1805,6 +1826,7 @@ function navigateTab(tab) {
   state.tab = tab;
   state.screenStack = [];
   state.screen = { type: 'tab', tab };
+  screenTransition = 'tab-change';
   render();
   if (tab === 'search' && state.searchText.trim()) scheduleYouTubeSearch(state.searchText, state.searchCategory, { immediate: true });
 }
@@ -1817,12 +1839,13 @@ function canStartBackGesture() {
     !refreshRunning;
 }
 
-function navigateBack() {
+function navigateBack({ animate = true } = {}) {
   const previous = state.screenStack.pop();
   state.screen = previous ? { ...previous } : { type: 'tab', tab: 'library' };
   if (state.screen.type === 'tab') state.tab = state.screen.tab;
   const previousScrollTop = Math.max(0, Number(state.screen.scrollTop) || 0);
   delete state.screen.scrollTop;
+  screenTransition = animate ? 'pop' : '';
   render();
   content.scrollTop = previousScrollTop;
 }
@@ -1830,6 +1853,7 @@ function navigateBack() {
 function pushScreen(screen) {
   state.screenStack.push({ ...state.screen, scrollTop: content.scrollTop });
   state.screen = screen;
+  screenTransition = 'push';
   render();
 }
 
@@ -1917,7 +1941,7 @@ function settleBackGesture(shouldComplete) {
   window.setTimeout(() => {
     if (backGesture !== activeGesture) return;
     clearBackGesture();
-    if (shouldComplete) navigateBack();
+    if (shouldComplete) navigateBack({ animate: false });
   }, settleDelay);
 }
 
@@ -2092,12 +2116,18 @@ function restoreScreenAfterRefresh() {
   try {
     const saved = JSON.parse(sessionStorage.getItem(REFRESH_ROUTE_KEY) || 'null');
     sessionStorage.removeItem(REFRESH_ROUTE_KEY);
-    if (!saved || !['home', 'new', 'radio', 'library', 'search'].includes(saved.tab)) return null;
+    const availableTabs = ['home', 'library', 'search'];
+    const removedTabs = ['new', 'radio'];
+    if (!saved || ![...availableTabs, ...removedTabs].includes(saved.tab)) return null;
     if (!saved.screen || !['tab', 'settings', 'category', 'item'].includes(saved.screen.type)) return null;
-    if (saved.screen.type === 'tab' && !['home', 'new', 'radio', 'library', 'search'].includes(saved.screen.tab)) return null;
-    state.tab = saved.tab;
-    state.screen = saved.screen;
-    state.screenStack = Array.isArray(saved.screenStack) ? saved.screenStack : [];
+    const savedScreen = { ...saved.screen };
+    if (savedScreen.type === 'tab' && removedTabs.includes(savedScreen.tab)) savedScreen.tab = 'home';
+    if (savedScreen.type === 'tab' && !availableTabs.includes(savedScreen.tab)) return null;
+    state.tab = removedTabs.includes(saved.tab) ? 'home' : saved.tab;
+    state.screen = savedScreen;
+    state.screenStack = (Array.isArray(saved.screenStack) ? saved.screenStack : []).map((screen) =>
+      screen?.type === 'tab' && removedTabs.includes(screen.tab) ? { ...screen, tab: 'home' } : screen
+    );
     return Number.isFinite(saved.scrollTop) ? Math.max(0, saved.scrollTop) : 0;
   } catch {
     try { sessionStorage.removeItem(REFRESH_ROUTE_KEY); } catch { /* Storage may be disabled. */ }
@@ -2616,7 +2646,7 @@ async function initialize() {
   state.favorites = state.favorites.filter((id) => validTrackIds.has(id));
   state.pinnedSongs = state.pinnedSongs.filter((id) => validTrackIds.has(id));
   state.recentTrackIds = state.recentTrackIds.filter((id) => validTrackIds.has(id));
-  state.currentTrackId = validTrackIds.has(state.currentTrackId) ? state.currentTrackId : state.localTracks[0]?.id || '';
+  state.currentTrackId = validTrackIds.has(state.currentTrackId) ? state.currentTrackId : '';
   localStorage.setItem('muzika-favorites', JSON.stringify(state.favorites));
   localStorage.setItem('muzika-pinned-songs', JSON.stringify(state.pinnedSongs));
   localStorage.setItem('muzika-recent-tracks', JSON.stringify(state.recentTrackIds));

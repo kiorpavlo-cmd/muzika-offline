@@ -2,12 +2,13 @@
 <html lang="uk">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
     <meta name="description" content="Офлайн музична медіатека для вашої музики.">
     <meta name="google-client-id" content="911469273892-hr4arur7kth3pjor37djpvp9fsduk6k1.apps.googleusercontent.com">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="iPod">
     <title>iPod</title>
     <link rel="manifest" href="./manifest.webmanifest">
     <link rel="icon" href="./assets/icon.png" type="image/png">
@@ -33,9 +34,8 @@
         <span class="pull-refresh-label visually-hidden">Потягніть вниз для оновлення</span>
       </div>
 
-      <section id="mini-player" class="mini-player" aria-label="Мініплеєр"></section>
+      <section id="mini-player" class="mini-player" aria-label="Мініплеєр" hidden></section>
       <nav id="tab-bar" class="tab-bar" aria-label="Основна навігація"></nav>
-      <div id="ios-home-indicator" aria-hidden="true"></div>
       <div class="orientation-guard" role="status" aria-live="polite">
         <div class="orientation-guard-card">
           <span class="orientation-rotate-icon" aria-hidden="true">↻</span>
