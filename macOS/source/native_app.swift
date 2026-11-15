@@ -1689,6 +1689,42 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         startPlayback(path: path)
     }
 
+    private func makeAudioPlayer(for path: String) throws -> AVAudioPlayer {
+        let url = URL(fileURLWithPath: path)
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        guard let header = try handle.read(upToCount: 10),
+              header.count == 10,
+              header.prefix(3).elementsEqual([0x49, 0x44, 0x33]) else {
+            return try AVAudioPlayer(contentsOf: url)
+        }
+
+        let sizeBytes = Array(header[6..<10])
+        guard sizeBytes.allSatisfy({ $0 & 0x80 == 0 }) else {
+            return try AVAudioPlayer(contentsOf: url)
+        }
+        let tagSize = (Int(sizeBytes[0]) << 21)
+            | (Int(sizeBytes[1]) << 14)
+            | (Int(sizeBytes[2]) << 7)
+            | Int(sizeBytes[3])
+        let audioOffset = 10 + tagSize
+
+        try handle.seek(toOffset: UInt64(audioOffset))
+        guard let containerHeader = try handle.read(upToCount: 8),
+              containerHeader.count == 8,
+              String(data: containerHeader[4..<8], encoding: .ascii) == "ftyp" else {
+            return try AVAudioPlayer(contentsOf: url)
+        }
+
+        let fileData = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard audioOffset < fileData.count else {
+            return try AVAudioPlayer(contentsOf: url)
+        }
+        let containerData = Data(fileData.dropFirst(audioOffset))
+        return try AVAudioPlayer(data: containerData, fileTypeHint: AVFileType.m4a.rawValue)
+    }
+
     private func startPlayback(path: String) {
         if let oldPath = playingPath {
             audioPlayer?.stop()
@@ -1698,7 +1734,7 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         }
 
         do {
-            let player = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+            let player = try makeAudioPlayer(for: path)
             player.delegate = self
             player.volume = playbackVolume
             player.numberOfLoops = playbackRepeatsCurrentTrack ? -1 : 0
