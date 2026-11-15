@@ -37,6 +37,254 @@ const database = (() => {
   };
 })();
 
+const artworkObjectUrls = new Map();
+const artworkExtractions = new Map();
+const MAX_EMBEDDED_ARTWORK_SIZE = 8 * 1024 * 1024;
+
+function imageMimeFromBytes(bytes, fallback = '') {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 6 && String.fromCharCode(...bytes.subarray(0, 6)).startsWith('GIF8')) return 'image/gif';
+  if (bytes.length >= 12 && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.subarray(8, 12)) === 'WEBP') return 'image/webp';
+  return /^image\/(png|jpeg|gif|webp|avif)$/i.test(fallback) ? fallback : '';
+}
+
+function artworkBlob(bytes, mime = '') {
+  if (!bytes?.length || bytes.length > MAX_EMBEDDED_ARTWORK_SIZE) return null;
+  const detectedMime = imageMimeFromBytes(bytes, mime);
+  return detectedMime ? new Blob([bytes], { type: detectedMime }) : null;
+}
+
+function parseFlacPictureBlock(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 0;
+  const readString = () => {
+    if (offset + 4 > bytes.length) return null;
+    const size = view.getUint32(offset);
+    offset += 4;
+    if (offset + size > bytes.length) return null;
+    const value = bytes.subarray(offset, offset + size);
+    offset += size;
+    return value;
+  };
+  if (bytes.length < 32) return null;
+  offset = 4;
+  const mimeBytes = readString();
+  if (!mimeBytes || !readString()) return null;
+  offset += 16;
+  if (offset + 4 > bytes.length) return null;
+  const imageSize = view.getUint32(offset);
+  offset += 4;
+  if (!imageSize || imageSize > MAX_EMBEDDED_ARTWORK_SIZE || offset + imageSize > bytes.length) return null;
+  const mime = new TextDecoder().decode(mimeBytes);
+  return artworkBlob(bytes.subarray(offset, offset + imageSize), mime);
+}
+
+function parseId3PictureFrame(frame, version) {
+  let offset = 0;
+  if (!frame.length) return null;
+  const encoding = frame[offset++];
+  let mime = '';
+  let pictureType;
+  if (version === 2) {
+    if (offset + 4 > frame.length) return null;
+    const format = String.fromCharCode(...frame.subarray(offset, offset + 3)).toLowerCase();
+    mime = format === 'jpg' ? 'image/jpeg' : format === 'png' ? 'image/png' : '';
+    offset += 3;
+    pictureType = frame[offset++];
+  } else {
+    const mimeEnd = frame.indexOf(0, offset);
+    if (mimeEnd < 0 || mimeEnd + 1 >= frame.length) return null;
+    mime = new TextDecoder().decode(frame.subarray(offset, mimeEnd));
+    offset = mimeEnd + 1;
+    pictureType = frame[offset++];
+  }
+  const terminator = encoding === 1 || encoding === 2 ? [0, 0] : [0];
+  let descriptionEnd = -1;
+  for (let index = offset; index <= frame.length - terminator.length; index += 1) {
+    if (terminator.every((byte, part) => frame[index + part] === byte)) { descriptionEnd = index; break; }
+  }
+  if (descriptionEnd < 0) return null;
+  offset = descriptionEnd + terminator.length;
+  if (offset >= frame.length) return null;
+  return { pictureType, blob: artworkBlob(frame.subarray(offset), mime) };
+}
+
+async function extractId3Artwork(file) {
+  if (file.size < 10) return null;
+  const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
+  if (String.fromCharCode(...header.subarray(0, 3)) !== 'ID3') return null;
+  const version = header[3];
+  if (version < 2 || version > 4) return null;
+  const tagSize = ((header[6] & 0x7f) << 21) | ((header[7] & 0x7f) << 14) | ((header[8] & 0x7f) << 7) | (header[9] & 0x7f);
+  if (!tagSize || tagSize > 32 * 1024 * 1024 || tagSize > file.size - 10) return null;
+  const tag = new Uint8Array(await file.slice(10, 10 + tagSize).arrayBuffer());
+  const headerSize = version === 2 ? 6 : 10;
+  let offset = 0;
+  if (header[5] & 0x40) {
+    if (version === 3 && tag.length >= 4) offset = 4 + new DataView(tag.buffer, tag.byteOffset, tag.byteLength).getUint32(0);
+    else if (version === 4 && tag.length >= 4) offset = (((tag[0] & 0x7f) << 21) | ((tag[1] & 0x7f) << 14) | ((tag[2] & 0x7f) << 7) | (tag[3] & 0x7f));
+  }
+  const pictures = [];
+  while (offset + headerSize <= tag.length) {
+    const frameId = String.fromCharCode(...tag.subarray(offset, offset + (version === 2 ? 3 : 4)));
+    if (!frameId.trim() || frameId.charCodeAt(0) === 0) break;
+    let frameSize;
+    if (version === 2) frameSize = (tag[offset + 3] << 16) | (tag[offset + 4] << 8) | tag[offset + 5];
+    else if (version === 4) frameSize = ((tag[offset + 4] & 0x7f) << 21) | ((tag[offset + 5] & 0x7f) << 14) | ((tag[offset + 6] & 0x7f) << 7) | (tag[offset + 7] & 0x7f);
+    else frameSize = new DataView(tag.buffer, tag.byteOffset, tag.byteLength).getUint32(offset + 4);
+    offset += headerSize;
+    if (!frameSize || offset + frameSize > tag.length) break;
+    if (frameId === 'APIC' || frameId === 'PIC') {
+      const picture = parseId3PictureFrame(tag.subarray(offset, offset + frameSize), version);
+      if (picture?.blob) {
+        if (picture.pictureType === 3) return picture.blob;
+        pictures.push(picture.blob);
+      }
+    }
+    offset += frameSize;
+  }
+  return pictures[0] || null;
+}
+
+async function extractFlacArtwork(file) {
+  if (file.size < 42) return null;
+  const signature = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  if (String.fromCharCode(...signature) !== 'fLaC') return null;
+  let offset = 4;
+  for (let blockIndex = 0; blockIndex < 256 && offset + 4 <= file.size; blockIndex += 1) {
+    const header = new Uint8Array(await file.slice(offset, offset + 4).arrayBuffer());
+    const lastBlock = Boolean(header[0] & 0x80);
+    const blockType = header[0] & 0x7f;
+    const blockSize = (header[1] << 16) | (header[2] << 8) | header[3];
+    offset += 4;
+    if (!blockSize || offset + blockSize > file.size) return null;
+    if ((blockType === 6 || blockType === 4) && blockSize <= 16 * 1024 * 1024) {
+      const block = new Uint8Array(await file.slice(offset, offset + blockSize).arrayBuffer());
+      if (blockType === 6) {
+        const picture = parseFlacPictureBlock(block);
+        if (picture) return picture;
+      } else if (block.length >= 8) {
+        const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+        let cursor = 0;
+        const vendorSize = view.getUint32(cursor); cursor += 4 + vendorSize;
+        if (cursor + 4 <= block.length) {
+          const count = Math.min(view.getUint32(cursor), 10000); cursor += 4;
+          for (let index = 0; index < count && cursor + 4 <= block.length; index += 1) {
+            const size = view.getUint32(cursor); cursor += 4;
+            if (cursor + size > block.length) break;
+            const comment = new TextDecoder().decode(block.subarray(cursor, cursor + size)); cursor += size;
+            const pictureValue = comment.match(/^METADATA_BLOCK_PICTURE=(.+)$/i)?.[1];
+            if (pictureValue && pictureValue.length <= 24 * 1024 * 1024) {
+              try {
+                const binary = atob(pictureValue);
+                const decoded = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+                const picture = parseFlacPictureBlock(decoded);
+                if (picture) return picture;
+              } catch { /* Ignore malformed base64 picture comments. */ }
+            }
+          }
+        }
+      }
+    }
+    offset += blockSize;
+    if (lastBlock) break;
+  }
+  return null;
+}
+
+async function extractMp4Artwork(file) {
+  const containers = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'udta', 'meta', 'ilst']);
+  async function scan(start, end, depth = 0) {
+    if (depth > 8) return null;
+    let offset = start;
+    while (offset + 8 <= end) {
+      const header = new Uint8Array(await file.slice(offset, offset + 16).arrayBuffer());
+      const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+      let atomSize = view.getUint32(0);
+      const atomType = String.fromCharCode(...header.subarray(4, 8));
+      let atomHeaderSize = 8;
+      if (atomSize === 1) {
+        if (header.length < 16) return null;
+        const largeSize = view.getBigUint64(8);
+        if (largeSize > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+        atomSize = Number(largeSize);
+        atomHeaderSize = 16;
+      } else if (atomSize === 0) atomSize = end - offset;
+      if (atomSize < atomHeaderSize || offset + atomSize > end) return null;
+      const payloadStart = offset + atomHeaderSize;
+      const atomEnd = offset + atomSize;
+      if (atomType === 'covr') {
+        let child = payloadStart;
+        while (child + 16 <= atomEnd) {
+          const dataHeader = new Uint8Array(await file.slice(child, child + 16).arrayBuffer());
+          const dataView = new DataView(dataHeader.buffer, dataHeader.byteOffset, dataHeader.byteLength);
+          const dataSize = dataView.getUint32(0);
+          if (dataSize < 16 || child + dataSize > atomEnd || String.fromCharCode(...dataHeader.subarray(4, 8)) !== 'data') break;
+          if (dataSize - 16 > MAX_EMBEDDED_ARTWORK_SIZE) break;
+          const imageBytes = new Uint8Array(await file.slice(child + 16, child + dataSize).arrayBuffer());
+          const dataType = dataView.getUint32(8);
+          const mime = dataType === 13 ? 'image/jpeg' : dataType === 14 ? 'image/png' : '';
+          const image = artworkBlob(imageBytes, mime);
+          if (image) return image;
+          child += dataSize;
+        }
+      }
+      if (containers.has(atomType)) {
+        const childrenStart = atomType === 'meta' ? payloadStart + 4 : payloadStart;
+        if (childrenStart <= atomEnd) {
+          const image = await scan(childrenStart, atomEnd, depth + 1);
+          if (image) return image;
+        }
+      }
+      offset += atomSize;
+    }
+    return null;
+  }
+  return scan(0, file.size);
+}
+
+async function readEmbeddedArtwork(file) {
+  try {
+    const id3 = await extractId3Artwork(file);
+    if (id3) return id3;
+    const flac = await extractFlacArtwork(file);
+    if (flac) return flac;
+    return await extractMp4Artwork(file);
+  } catch { return null; }
+}
+
+function artworkObjectUrl(track) {
+  if (!track?.artwork || !track.id) return '';
+  const cached = artworkObjectUrls.get(track.id);
+  if (cached?.blob === track.artwork) return cached.url;
+  if (cached) URL.revokeObjectURL(cached.url);
+  const url = URL.createObjectURL(track.artwork);
+  artworkObjectUrls.set(track.id, { blob: track.artwork, url });
+  return url;
+}
+
+function patchTrackArtwork(track) {
+  document.querySelectorAll('[data-artwork-track-id]').forEach((element) => {
+    if (element.dataset.artworkTrackId !== track.id) return;
+    element.outerHTML = artMarkup(track, element.dataset.artworkLabel || '', element.dataset.artworkClass || '');
+  });
+  syncSystemMediaSession();
+}
+
+function scheduleArtworkExtraction(track) {
+  if (!track?.file || track.artworkChecked || artworkExtractions.has(track.id)) return;
+  const extraction = (async () => {
+    const artwork = await readEmbeddedArtwork(track.file);
+    const updated = { ...track, artwork: artwork || undefined, artworkChecked: true };
+    await database.add(updated).catch(() => {});
+    const index = state.localTracks.findIndex((item) => item.id === track.id);
+    if (index >= 0) state.localTracks[index] = updated;
+    if (artwork) patchTrackArtwork(updated);
+  })().finally(() => artworkExtractions.delete(track.id));
+  artworkExtractions.set(track.id, extraction);
+}
+
 const icons = {
   home: '<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/>',
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
@@ -735,7 +983,9 @@ function profileButtonMarkup() {
   return `<button class="profile-button ${profilePictureUrl(profile) ? 'profile-button--photo' : ''}" data-action="settings" aria-label="${label}">${profileAvatarContents(profile)}</button>`;
 }
 
-function artMarkup(art, label, extra = '') {
+function artMarkup(artOrTrack, label, extra = '') {
+  const track = artOrTrack && typeof artOrTrack === 'object' ? artOrTrack : null;
+  const art = track ? track.art : artOrTrack;
   const palettes = [
     ['#ba5147', '#3e1d30', '#ffbd78'], ['#d17b31', '#432039', '#ffd36b'],
     ['#426fbd', '#19294b', '#9fd7ff'], ['#7b65b8', '#292044', '#e0a9ff'],
@@ -748,7 +998,14 @@ function artMarkup(art, label, extra = '') {
   const [start, end, accent] = palettes[(hash >>> 0) % palettes.length];
   const words = title.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   const monogram = words.slice(0, 2).map((word) => Array.from(word)[0]).join('').toLocaleUpperCase('uk') || '♫';
-  return `<div class="artwork artwork--generated ${extra}" style="--art-a:${start};--art-b:${end};--art-c:${accent}" aria-hidden="true"><span class="artwork-monogram">${safeText(monogram)}</span><span class="artwork-caption">${safeText(title)}</span></div>`;
+  const trackAttributes = track?.id
+    ? ` data-artwork-track-id="${safeText(track.id)}" data-artwork-label="${safeText(title)}" data-artwork-class="${safeText(extra)}"`
+    : '';
+  if (track?.artwork instanceof Blob) {
+    return `<div class="artwork artwork--photo ${extra}"${trackAttributes} aria-hidden="true"><img class="artwork-image" src="${safeText(artworkObjectUrl(track))}" alt=""></div>`;
+  }
+  if (track?.file && !track.artworkChecked) scheduleArtworkExtraction(track);
+  return `<div class="artwork artwork--generated ${extra}" style="--art-a:${start};--art-b:${end};--art-c:${accent}"${trackAttributes} aria-hidden="true"><span class="artwork-monogram">${safeText(monogram)}</span><span class="artwork-caption">${safeText(title)}</span></div>`;
 }
 
 function currentTrack() {
@@ -762,14 +1019,14 @@ function allTracks() {
 function libraryAlbums() {
   return [...new Map(allTracks().map((track) => [track.album || 'Додані аудіофайли', {
     id: track.album || 'Додані аудіофайли', title: track.album || 'Додані аудіофайли',
-    artist: track.artist || 'Невідомий виконавець', art: 'local', kind: 'album'
+    artist: track.artist || 'Невідомий виконавець', art: 'local', kind: 'album', representativeTrack: track
   }])).values()];
 }
 
 function libraryArtists() {
   return [...new Map(allTracks().map((track) => [track.artist || 'Невідомий виконавець', {
     id: track.artist || 'Невідомий виконавець', title: track.artist || 'Невідомий виконавець',
-    art: 'local', kind: 'artist'
+    art: 'local', kind: 'artist', representativeTrack: track
   }])).values()];
 }
 
@@ -801,7 +1058,7 @@ function songRow(track, index, options = {}) {
   const playing = state.currentTrackId === track.id && state.isPlaying;
   return `<div class="song-row" data-song-index="${index}">
     ${options.leadingFavorite ? `<span class="song-leading-favorite" aria-hidden="true">${favorite ? '★' : ''}</span>` : ''}
-    ${artMarkup(track.art, track.album || track.title, 'song-art')}
+    ${artMarkup(track, track.album || track.title, 'song-art')}
     <button class="song-main" data-action="play-track" data-id="${safeText(track.id)}" aria-label="Відтворити ${safeText(track.title)}">
       <span class="song-title">${safeText(track.title)}</span><span class="song-artist">${safeText(track.artist)}${options.showAlbum ? ` · ${safeText(track.album)}` : ''}</span>
     </button>
@@ -820,7 +1077,7 @@ function openSongMenu(track) {
   const root = $('#modal-root');
   root.innerHTML = `<div id="song-menu-backdrop" class="action-modal">
     <section class="action-sheet" role="dialog" aria-modal="true" aria-label="Дії з піснею">
-      <div class="action-track-head">${artMarkup(track.art, track.album, 'action-art')}<button class="action-feature" data-action="toggle-favorite" data-id="${safeText(track.id)}">${icon('star')}<span>${favorite ? 'Вилучити з улюблених' : 'Додати до улюблених'}</span></button></div>
+      <div class="action-track-head">${artMarkup(track, track.album, 'action-art')}<button class="action-feature" data-action="toggle-favorite" data-id="${safeText(track.id)}">${icon('star')}<span>${favorite ? 'Вилучити з улюблених' : 'Додати до улюблених'}</span></button></div>
       <button class="song-action-row" data-action="toggle-pin" data-id="${safeText(track.id)}">${icon('pin')}<span>${pinned ? 'Відкріпити пісню' : 'Закріпити пісню'}</span></button>
       <button class="song-action-row" data-action="open-playlist-menu" data-id="${safeText(track.id)}">${icon('playlistAdd')}<span>Додати до підбірки</span></button>
       <button class="song-action-row" data-action="play-next" data-id="${safeText(track.id)}">${icon('queue')}<span>Відтворити далі</span></button>
@@ -837,7 +1094,7 @@ function openSearchTrackMenu(track) {
   const favorite = state.favorites.includes(track.id);
   const title = safeText(track.title);
   const artist = safeText(track.artist || 'Невідомий виконавець');
-  $('#modal-root').innerHTML = `<div id="search-track-menu-backdrop" class="action-modal"><section class="action-sheet youtube-action-sheet" role="dialog" aria-modal="true" aria-label="Дії з піснею"><div class="action-track-head">${artMarkup(track.art, track.album, 'action-art')}<div class="youtube-menu-copy"><strong>${title}</strong><small>${artist}</small></div></div><div class="youtube-menu-quick"><button class="youtube-menu-quick-action" disabled>${icon('plusCircle')}<span>У медіатеці</span></button><button class="youtube-menu-quick-action" data-action="toggle-favorite" data-id="${safeText(track.id)}">${icon('star', favorite ? 'youtube-favorite-active' : '')}<span>${favorite ? 'В улюблених' : 'Додати до улюблених'}</span></button><button class="youtube-menu-quick-action" data-action="share-local-track" data-id="${safeText(track.id)}">${icon('share')}<span>Поширити</span></button></div><div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="open-playlist-menu" data-id="${safeText(track.id)}">${icon('playlistAdd')}<span>Додати до підбірки</span></button><button class="song-action-row youtube-menu-row" data-action="play-next" data-id="${safeText(track.id)}">${icon('queue')}<span>Відтворити далі</span></button><button class="song-action-row youtube-menu-row" data-action="search-youtube-text" data-title="${artist}">${icon('station')}<span>Створити станцію</span></button></div><div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="open-track-album" data-id="${safeText(track.id)}">${icon('albumFile')}<span>Перейти до альбому<small>${safeText(track.album || '')}</small></span></button><button class="song-action-row youtube-menu-row" data-action="open-item" data-kind="artist" data-id="${artist}">${icon('artist')}<span>Перейти до виконавця</span></button><button class="song-action-row youtube-menu-row" data-action="open-item" data-kind="artist" data-id="${artist}">${icon('info')}<span>Переглянути дані про автора</span></button></div><div class="youtube-menu-group youtube-menu-group--last"><button class="song-action-row youtube-menu-row" data-action="hide-search-track" data-id="${safeText(track.id)}">${icon('dislike')}<span>Пропонувати менше</span></button></div></section></div>`;
+  $('#modal-root').innerHTML = `<div id="search-track-menu-backdrop" class="action-modal"><section class="action-sheet youtube-action-sheet" role="dialog" aria-modal="true" aria-label="Дії з піснею"><div class="action-track-head">${artMarkup(track, track.album, 'action-art')}<div class="youtube-menu-copy"><strong>${title}</strong><small>${artist}</small></div></div><div class="youtube-menu-quick"><button class="youtube-menu-quick-action" disabled>${icon('plusCircle')}<span>У медіатеці</span></button><button class="youtube-menu-quick-action" data-action="toggle-favorite" data-id="${safeText(track.id)}">${icon('star', favorite ? 'youtube-favorite-active' : '')}<span>${favorite ? 'В улюблених' : 'Додати до улюблених'}</span></button><button class="youtube-menu-quick-action" data-action="share-local-track" data-id="${safeText(track.id)}">${icon('share')}<span>Поширити</span></button></div><div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="open-playlist-menu" data-id="${safeText(track.id)}">${icon('playlistAdd')}<span>Додати до підбірки</span></button><button class="song-action-row youtube-menu-row" data-action="play-next" data-id="${safeText(track.id)}">${icon('queue')}<span>Відтворити далі</span></button><button class="song-action-row youtube-menu-row" data-action="search-youtube-text" data-title="${artist}">${icon('station')}<span>Створити станцію</span></button></div><div class="youtube-menu-group"><button class="song-action-row youtube-menu-row" data-action="open-track-album" data-id="${safeText(track.id)}">${icon('albumFile')}<span>Перейти до альбому<small>${safeText(track.album || '')}</small></span></button><button class="song-action-row youtube-menu-row" data-action="open-item" data-kind="artist" data-id="${artist}">${icon('artist')}<span>Перейти до виконавця</span></button><button class="song-action-row youtube-menu-row" data-action="open-item" data-kind="artist" data-id="${artist}">${icon('info')}<span>Переглянути дані про автора</span></button></div><div class="youtube-menu-group youtube-menu-group--last"><button class="song-action-row youtube-menu-row" data-action="hide-search-track" data-id="${safeText(track.id)}">${icon('dislike')}<span>Пропонувати менше</span></button></div></section></div>`;
   $('#search-track-menu-backdrop').addEventListener('click', (event) => {
     if (event.target.id === 'search-track-menu-backdrop') closeSongMenu();
   });
@@ -898,8 +1155,8 @@ async function playNextTrack() {
   await playTrack(list[(index + 1) % list.length] || list[0]);
 }
 
-async function playPreviousTrack() {
-  if (currentTrack()?.local && audio.currentTime > 3) {
+async function playPreviousTrack(forceTrackChange = false) {
+  if (!forceTrackChange && currentTrack()?.local && audio.currentTime > 3) {
     audio.currentTime = 0;
     syncNowPlayingPlayback();
     return;
@@ -915,6 +1172,9 @@ async function deleteTrackFromLibrary(trackId) {
   if (!track) return closeSongMenu();
   try {
     await database.remove(trackId);
+    const cachedArtwork = artworkObjectUrls.get(trackId);
+    if (cachedArtwork) URL.revokeObjectURL(cachedArtwork.url);
+    artworkObjectUrls.delete(trackId);
     state.localTracks = state.localTracks.filter((item) => item.id !== trackId);
     state.favorites = state.favorites.filter((id) => id !== trackId);
     state.pinnedSongs = state.pinnedSongs.filter((id) => id !== trackId);
@@ -952,7 +1212,7 @@ function renderHome() {
       <div class="favorite-art">${icon('star')}</div><span class="feature-kicker">Ваша медіатека</span><strong>Улюблені пісні</strong><span>${favoriteCount} ${favoriteCount === 1 ? 'пісня' : 'пісень'}</span>
     </button>
   </div>` : '';
-  const recentSection = recentlyPlayed.length ? `${sectionHeading('Нещодавно слухали', 'Усі', 'recent')}<div class="recent-card-strip">${recentlyPlayed.slice(0, 6).map((track) => `<button class="recent-listen-card" data-action="play-track" data-id="${safeText(track.id)}">${artMarkup(track.art, track.album || track.title, 'recent-listen-art')}<strong>${safeText(track.title)}</strong><small>${safeText(track.artist)}</small></button>`).join('')}</div>` : '';
+  const recentSection = recentlyPlayed.length ? `${sectionHeading('Нещодавно слухали', 'Усі', 'recent')}<div class="recent-card-strip">${recentlyPlayed.slice(0, 6).map((track) => `<button class="recent-listen-card" data-action="play-track" data-id="${safeText(track.id)}">${artMarkup(track, track.album || track.title, 'recent-listen-art')}<strong>${safeText(track.title)}</strong><small>${safeText(track.artist)}</small></button>`).join('')}</div>` : '';
   const librarySection = recentlyAdded.length ? `${sectionHeading('Недавно додані', 'Усі', 'all-albums')}<div class="song-list">${recentlyAdded.map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : '';
   const quickSyncAction = downloadServerConfig()
     ? '<button class="settings-action-card mac-sync-library-action" data-action="mac-sync">' + icon('download') + '<span><strong>Синхронізувати з Mac</strong><small>Нові пісні з’являться у медіатеці</small></span></button>'
@@ -1268,9 +1528,9 @@ function renderSearchBody() {
   const albums = libraryAlbums().filter((album) => `${album.title} ${album.artist}`.toLocaleLowerCase().includes(normalizedQuery));
   const tabs = [['top', 'Найкращі результати'], ['artists', 'Виконавці'], ['albums', 'Альбоми']];
   const tabMarkup = `<nav class="search-tabs" role="tablist" aria-label="Категорії пошуку">${tabs.map(([key, title]) => `<button class="search-tab ${state.searchCategory === key ? 'search-tab--active' : ''}" role="tab" aria-selected="${state.searchCategory === key}" data-action="search-category" data-category="${key}">${title}</button>`).join('')}</nav>`;
-  const artistRows = artists.map((artist) => `<button class="search-result-entity" data-action="open-item" data-kind="artist" data-id="${safeText(artist.id)}">${artMarkup(artist.art, artist.title, 'search-result-art search-result-art--round')}<span class="search-result-copy"><strong>${safeText(artist.title)}</strong><small>Виконавець</small></span>${icon('back', 'chevron')}</button>`).join('');
-  const trackRows = tracks.map((track) => `<div class="song-row search-song-row">${artMarkup(track.art, track.album, 'song-art')}<button class="song-main" data-action="play-track" data-id="${safeText(track.id)}"><span class="song-title">${safeText(track.title)}${track.explicit ? '<span class="explicit-mark">E</span>' : ''}</span><span class="song-artist">Пісня · ${safeText(track.artist)}</span></button><button class="icon-button song-more" data-action="search-track-menu" data-id="${safeText(track.id)}" aria-label="Додаткові дії">${icon('more')}</button></div>`).join('');
-  const albumRows = albums.map((album) => `<button class="search-result-entity" data-action="open-item" data-kind="album" data-id="${safeText(album.id)}">${artMarkup(album.art, album.title, 'search-result-art')}<span class="search-result-copy"><strong>${safeText(album.title)}</strong><small>Альбом · ${safeText(album.artist)}</small></span>${icon('back', 'chevron')}</button>`).join('');
+  const artistRows = artists.map((artist) => `<button class="search-result-entity" data-action="open-item" data-kind="artist" data-id="${safeText(artist.id)}">${artMarkup(artist.representativeTrack || artist, artist.title, 'search-result-art search-result-art--round')}<span class="search-result-copy"><strong>${safeText(artist.title)}</strong><small>Виконавець</small></span>${icon('back', 'chevron')}</button>`).join('');
+  const trackRows = tracks.map((track) => `<div class="song-row search-song-row">${artMarkup(track, track.album, 'song-art')}<button class="song-main" data-action="play-track" data-id="${safeText(track.id)}"><span class="song-title">${safeText(track.title)}${track.explicit ? '<span class="explicit-mark">E</span>' : ''}</span><span class="song-artist">Пісня · ${safeText(track.artist)}</span></button><button class="icon-button song-more" data-action="search-track-menu" data-id="${safeText(track.id)}" aria-label="Додаткові дії">${icon('more')}</button></div>`).join('');
+  const albumRows = albums.map((album) => `<button class="search-result-entity" data-action="open-item" data-kind="album" data-id="${safeText(album.id)}">${artMarkup(album.representativeTrack || album, album.title, 'search-result-art')}<span class="search-result-copy"><strong>${safeText(album.title)}</strong><small>Альбом · ${safeText(album.artist)}</small></span>${icon('back', 'chevron')}</button>`).join('');
   const hasRemoteResults = state.youtubeSearchQuery === query && state.youtubeSearchCategory === state.searchCategory;
   const visibleYouTubeResults = state.youtubeResults.filter((item) => {
     const kind = item.id?.videoId ? 'video' : item.id?.channelId ? 'channel' : 'playlist';
@@ -1302,7 +1562,7 @@ function renderItemScreen() {
   list = prioritizePinned(list);
   const itemCount = list.length + youtubeFavorites.length;
   return `<header class="subpage-top"><button class="round-back" data-action="back">${icon('back')}</button><span></span></header>
-    <section class="detail-heading">${kind === 'artist' ? artMarkup(item.art, item.title, 'detail-art detail-art--artist') : ''}<h1>${safeText(heading)}</h1>${kind !== 'artist' ? `<p>${safeText(item.artist || 'Ваша медіатека')}</p>` : ''}</section>
+    <section class="detail-heading">${kind === 'artist' ? artMarkup(item.representativeTrack || item, item.title, 'detail-art detail-art--artist') : ''}<h1>${safeText(heading)}</h1>${kind !== 'artist' ? `<p>${safeText(item.artist || 'Ваша медіатека')}</p>` : ''}</section>
     ${itemCount ? `<div class="detail-actions"><button data-action="play-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('play')} Відтворити</button><button data-action="shuffle-list" data-id="${safeText(id)}" data-kind="${safeText(kind)}">${icon('shuffle')} Тасувати</button></div>` : ''}
     ${kind === 'artist' ? `<h2 class="letter-heading">Популярні пісні</h2>` : `<h2 class="letter-heading">${kind === 'playlist' ? 'Пісні' : 'A'}</h2>`}
     <div class="song-list song-list--detail">${list.map((track, i) => songRow(track, i, { showAlbum: false })).join('')}${youtubeFavorites.map((item) => youtubeResultRow(item, { saved: true })).join('') || (!list.length ? '<div class="empty-state">Тут поки немає пісень. Додайте власні аудіофайли, щоб слухати їх офлайн.</div>' : '')}</div>`;
@@ -1316,10 +1576,10 @@ function renderCategory() {
     rows = `<button class="entity-row" data-action="open-item" data-kind="playlist" data-id="favorites"><span class="favorite-art entity-art">${icon('star')}</span><span>Улюблені пісні</span>${icon('back', 'chevron')}</button>`;
   } else if (category === 'artists') {
     const sorted = libraryArtists().sort((a, b) => a.title.localeCompare(b.title, 'uk'));
-    rows = sorted.length ? `<div class="alphabet" aria-hidden="true">${'АБВГДЕЄЖЗИІКЛМНОПРСТУФХЦЧШЩЬЮЯ#'.split('').map((char) => `<span>${char}</span>`).join('')}</div>${sorted.map((artist) => `<button class="entity-row" data-action="open-item" data-kind="artist" data-id="${safeText(artist.id)}">${artMarkup(artist.art, artist.title, 'entity-art entity-art--round')}<span>${safeText(artist.title)}</span>${icon('back', 'chevron')}</button>`).join('')}` : '<div class="empty-state">Тут з’являться виконавці з ваших аудіофайлів.</div>';
+    rows = sorted.length ? `<div class="alphabet" aria-hidden="true">${'АБВГДЕЄЖЗИІКЛМНОПРСТУФХЦЧШЩЬЮЯ#'.split('').map((char) => `<span>${char}</span>`).join('')}</div>${sorted.map((artist) => `<button class="entity-row" data-action="open-item" data-kind="artist" data-id="${safeText(artist.id)}">${artMarkup(artist.representativeTrack || artist, artist.title, 'entity-art entity-art--round')}<span>${safeText(artist.title)}</span>${icon('back', 'chevron')}</button>`).join('')}` : '<div class="empty-state">Тут з’являться виконавці з ваших аудіофайлів.</div>';
   } else if (category === 'albums') {
     const albums = libraryAlbums();
-    rows = albums.length ? `<div class="album-grid">${albums.map((album) => `<button class="album-card" data-action="open-item" data-kind="album" data-id="${safeText(album.id)}">${artMarkup(album.art, album.title)}<span class="album-title">${safeText(album.title)}</span><span class="album-subtitle">${safeText(album.artist)}</span></button>`).join('')}</div>` : '<div class="empty-state">Тут з’являться альбоми з ваших аудіофайлів.</div>';
+    rows = albums.length ? `<div class="album-grid">${albums.map((album) => `<button class="album-card" data-action="open-item" data-kind="album" data-id="${safeText(album.id)}">${artMarkup(album.representativeTrack || album, album.title)}<span class="album-title">${safeText(album.title)}</span><span class="album-subtitle">${safeText(album.artist)}</span></button>`).join('')}</div>` : '<div class="empty-state">Тут з’являться альбоми з ваших аудіофайлів.</div>';
   } else if (category === 'songs') {
     const list = sortTracksByArtist(allTracks());
     const groups = [];
@@ -1492,7 +1752,7 @@ function renderPlayer() {
     return;
   }
   player.hidden = false;
-  player.innerHTML = `<button class="player-track" data-action="now-playing">${artMarkup(track.art, track.album || track.title, 'player-art')}<span class="player-copy"><strong>${safeText(track.title)}</strong><small>${safeText(track.artist)}</small></span></button><button class="player-control" data-action="toggle-play" aria-label="${state.isPlaying ? 'Пауза' : 'Відтворити'}">${icon(state.isPlaying ? 'pause' : 'play')}</button><button class="player-control player-next" data-action="next-track" aria-label="Наступна пісня">${icon('next')}</button>`;
+  player.innerHTML = `<button class="player-track" data-action="now-playing">${artMarkup(track, track.album || track.title, 'player-art')}<span class="player-copy"><strong>${safeText(track.title)}</strong><small>${safeText(track.artist)}</small></span></button><button class="player-control" data-action="toggle-play" aria-label="${state.isPlaying ? 'Пауза' : 'Відтворити'}">${icon(state.isPlaying ? 'pause' : 'play')}</button><button class="player-control player-next" data-action="next-track" aria-label="Наступна пісня">${icon('next')}</button>`;
 }
 
 function formatPlayerTime(seconds) {
@@ -1515,7 +1775,7 @@ function renderNowPlayingScreen() {
         <button class="now-playing-more" data-action="player-queue" aria-label="Черга відтворення">${icon('more')}</button>
       </header>
       <div class="now-playing-content">
-        <div class="now-playing-art-wrap now-playing-drag-zone">${artMarkup(track.art, track.album || track.title, 'now-playing-art')}</div>
+        <div class="now-playing-art-wrap now-playing-drag-zone">${artMarkup(track, track.album || track.title, 'now-playing-art')}</div>
         <div class="now-playing-track-info">
           <div class="now-playing-copy"><strong>${safeText(track.title)}</strong><span>${safeText(track.artist)}</span></div>
           <button class="now-playing-favorite" data-action="toggle-player-favorite" aria-label="${state.favorites.includes(track.id) ? 'Вилучити з улюблених' : 'Додати до улюблених'}">${icon('star', state.favorites.includes(track.id) ? 'is-favorite' : '')}</button>
@@ -1529,7 +1789,7 @@ function renderNowPlayingScreen() {
           <button id="now-playing-toggle" class="now-playing-toggle" data-action="toggle-play" aria-label="${state.isPlaying ? 'Пауза' : 'Відтворити'}">${icon(state.isPlaying ? 'pause' : 'play')}</button>
           <button class="now-playing-secondary" data-action="next-track" aria-label="Наступна пісня">${icon('next')}</button>
         </div>
-        <div class="now-playing-volume-row"><span>${icon('volume')}</span><input id="player-volume" class="player-range player-volume" type="range" min="0" max="1" step="0.01" value="${audio.volume}" aria-label="Гучність" ${playable ? '' : 'disabled'}><span>${icon('volume', 'volume-high')}</span></div>
+        <div class="now-playing-volume-row"><span>${icon('volume')}</span><input id="player-volume" class="player-range player-volume" type="range" min="0" max="1" step="0.01" value="${audio.volume}" style="--range-progress:${audio.volume * 100}%" aria-label="Гучність" ${playable ? '' : 'disabled'}><span>${icon('volume', 'volume-high')}</span></div>
         <p class="now-playing-note ${playable ? 'now-playing-note--ready' : ''}">${playable ? 'Офлайн-аудіо збережено на цьому пристрої' : 'Додайте аудіофайл, щоб слухати офлайн'}</p>
       </div>
     </section>`;
@@ -1642,7 +1902,7 @@ function syncNowPlayingPlayback() {
   syncSystemMediaSession();
 }
 
-let mediaSessionTrackId = '';
+let mediaSessionMetadataKey = '';
 
 function syncSystemMediaSession() {
   const mediaSession = navigator.mediaSession;
@@ -1651,21 +1911,23 @@ function syncSystemMediaSession() {
   if (!track?.local) {
     mediaSession.metadata = null;
     mediaSession.playbackState = 'none';
-    mediaSessionTrackId = '';
+    mediaSessionMetadataKey = '';
     return;
   }
-  if (mediaSessionTrackId !== track.id && typeof MediaMetadata === 'function') {
+  const metadataKey = `${track.id}:${track.artwork?.size || 0}:${track.artwork?.type || ''}`;
+  if (mediaSessionMetadataKey !== metadataKey && typeof MediaMetadata === 'function') {
+    const artworkUrl = artworkObjectUrl(track) || new URL('./assets/icon.png', location.href).href;
     mediaSession.metadata = new MediaMetadata({
       title: track.title || 'Без назви',
       artist: track.artist || 'Невідомий виконавець',
       album: track.album || 'Music',
       artwork: [{
-        src: new URL('./assets/icon.png', location.href).href,
+        src: artworkUrl,
         sizes: '512x512',
-        type: 'image/png'
+        type: track.artwork?.type || 'image/png'
       }]
     });
-    mediaSessionTrackId = track.id;
+    mediaSessionMetadataKey = metadataKey;
   }
   mediaSession.playbackState = audio.currentSrc ? (state.isPlaying ? 'playing' : 'paused') : 'none';
   if (audio.currentSrc && Number.isFinite(audio.duration) && audio.duration > 0 && typeof mediaSession.setPositionState === 'function') {
@@ -1682,6 +1944,9 @@ function syncSystemMediaSession() {
 function registerSystemMediaActions() {
   const mediaSession = navigator.mediaSession;
   if (!mediaSession?.setActionHandler) return;
+  for (const action of ['seekbackward', 'seekforward']) {
+    try { mediaSession.setActionHandler(action, null); } catch { /* Clear stale 10-second skip actions on WebKit. */ }
+  }
   const handlers = {
     play: async () => {
       const track = currentTrack();
@@ -1693,23 +1958,14 @@ function registerSystemMediaActions() {
       try { await audio.play(); } catch { /* Playback still requires a valid user or system gesture. */ }
     },
     pause: () => audio.pause(),
-    previoustrack: () => { void playPreviousTrack(); },
+    previoustrack: () => { void playPreviousTrack(true); },
     nexttrack: () => { void playNextTrack(); },
     seekto: (details) => {
       if (!currentTrack()?.local || !Number.isFinite(details.seekTime) || !Number.isFinite(audio.duration)) return;
       audio.currentTime = Math.min(Math.max(details.seekTime, 0), audio.duration);
       syncNowPlayingPlayback();
     },
-    seekbackward: (details) => {
-      if (!currentTrack()?.local || !Number.isFinite(audio.duration)) return;
-      audio.currentTime = Math.max(0, audio.currentTime - (details.seekOffset || 10));
-      syncNowPlayingPlayback();
-    },
-    seekforward: (details) => {
-      if (!currentTrack()?.local || !Number.isFinite(audio.duration)) return;
-      audio.currentTime = Math.min(audio.duration, audio.currentTime + (details.seekOffset || 10));
-      syncNowPlayingPlayback();
-    }
+    // Leave seekbackward/seekforward unset so iOS renders track navigation controls.
   };
   for (const [action, handler] of Object.entries(handlers)) {
     try { mediaSession.setActionHandler(action, handler); } catch { /* Unsupported actions vary across iOS versions. */ }
@@ -1726,7 +1982,7 @@ function syncNowPlayingTrack() {
   const progress = $('#player-progress');
   const volume = $('#player-volume');
   if (!artwork || !track) return;
-  artwork.innerHTML = artMarkup(track.art, track.album, 'now-playing-art');
+  artwork.innerHTML = artMarkup(track, track.album || track.title, 'now-playing-art');
   if (copy) copy.innerHTML = `<strong>${safeText(track.title)}</strong><span>${safeText(track.artist)}</span>`;
   if (favoriteButton) {
     const favorite = state.favorites.includes(track.id);
@@ -2578,7 +2834,10 @@ $('#player-root').addEventListener('input', (event) => {
     const time = $('#player-current-time');
     if (time) time.textContent = formatPlayerTime(audio.currentTime);
   }
-  if (event.target.id === 'player-volume') audio.volume = Number(event.target.value);
+  if (event.target.id === 'player-volume') {
+    audio.volume = Number(event.target.value);
+    event.target.style.setProperty('--range-progress', `${audio.volume * 100}%`);
+  }
 });
 
 audio.addEventListener('ended', async () => {
@@ -2587,6 +2846,12 @@ audio.addEventListener('ended', async () => {
 audio.addEventListener('timeupdate', syncNowPlayingPlayback);
 audio.addEventListener('loadedmetadata', syncNowPlayingPlayback);
 audio.addEventListener('durationchange', syncNowPlayingPlayback);
+audio.addEventListener('volumechange', () => {
+  const volume = $('#player-volume');
+  if (!volume) return;
+  volume.value = String(audio.volume);
+  volume.style.setProperty('--range-progress', `${audio.volume * 100}%`);
+});
 audio.addEventListener('play', () => {
   state.isPlaying = true;
   renderPlayer();

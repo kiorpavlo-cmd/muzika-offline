@@ -270,7 +270,7 @@ button { border: 0; cursor: pointer; }
 .now-playing-toggle { width: 66px; height: 66px; border-radius: 50%; background: #f4f4f6; color: #151517; box-shadow: 0 5px 20px #0005; transition: transform .18s ease, background .18s ease; }.now-playing-toggle:active { transform: scale(.92); }
 .now-playing-toggle .icon { width: 28px; height: 28px; fill: currentColor; stroke: none; }
 .now-playing-volume-row { height: 35px; display: flex; align-items: center; gap: 10px; color: #9c9ca2; }.now-playing-volume-row > span { width: 18px; display: grid; place-items: center; }.now-playing-volume-row .icon { width: 15px; height: 15px; }.now-playing-volume-row .volume-high { width: 18px; height: 18px; }
-.player-volume { flex: 1; }.player-volume::-webkit-slider-runnable-track { height: 3px; background: linear-gradient(to right, #aeb0b5 50%, #505055 50%); }.player-volume::-moz-range-track { height: 3px; background: #505055; }.player-volume::-moz-range-progress { height: 3px; background: #aeb0b5; }
+.player-volume { flex: 1; }.player-volume::-webkit-slider-runnable-track { height: 3px; background: linear-gradient(to right, #aeb0b5 var(--range-progress, 100%), #505055 var(--range-progress, 100%)); }.player-volume::-moz-range-track { height: 3px; background: #505055; }.player-volume::-moz-range-progress { height: 3px; background: #aeb0b5; }
 .now-playing-note { min-height: 18px; margin: 6px 0 0; color: #818187; text-align: center; font-size: 11px; }.now-playing-note--ready { color: #8d8d93; }
 .now-playing-home-indicator { position: absolute; left: 50%; bottom: calc(8px + var(--safe-bottom)); width: 108px; height: 4px; border-radius: 5px; background: #f5f5f7; transform: translateX(-50%); }
 .now-playing-drag-zone { touch-action: pan-x; }
@@ -552,6 +552,9 @@ button:disabled { cursor: default; }
               linear-gradient(145deg, var(--art-a), var(--art-b) 72%);
   text-align: center;
 }
+.artwork--photo { background: #17171a; }
+.artwork--photo::before, .artwork--photo::after { display: none; }
+.artwork-image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .artwork--generated::before {
   z-index: 0;
   inset: 11% -34% -23% 25%;
