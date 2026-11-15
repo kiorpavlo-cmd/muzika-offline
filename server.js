@@ -13,6 +13,8 @@ const HTTPS_PORT = Number(process.env.MUZIKA_PORT || 3443);
 const HOST = process.env.MUZIKA_HOST || '0.0.0.0';
 const MAX_REQUEST_BYTES = 2048;
 const MAX_AUDIO_BYTES = 120 * 1024 * 1024;
+const SYNC_PROTOCOL_VERSION = 2;
+const SYNC_SERVER_INSTANCE_ID = crypto.randomUUID();
 const LIBRARY_AUDIO_EXTENSIONS = new Set([
   '.mp3', '.m4a', '.mp4', '.flac', '.ogg', '.oga', '.opus',
   '.wav', '.aiff', '.aif', '.wma', '.ape', '.wv', '.mpc', '.tta'
@@ -45,12 +47,14 @@ function writeJson(res, status, payload) {
 
 function getLanAddresses() {
   const addresses = [];
-  for (const entries of Object.values(os.networkInterfaces())) {
+  for (const [name, entries] of Object.entries(os.networkInterfaces())) {
     for (const entry of entries || []) {
-      if (entry.family === 'IPv4' && !entry.internal) addresses.push(entry.address);
+      if (entry.family === 'IPv4' && !entry.internal) addresses.push({ interface: name, address: entry.address });
     }
   }
-  return [...new Set(addresses)];
+  const unique = [...new Map(addresses.map((item) => [item.address, item])).values()];
+  const rank = (name) => name === 'en0' ? 0 : /^en\d+$/.test(name) ? 1 : /^bridge\d+$/.test(name) ? 2 : /^utun\d+$/.test(name) ? 3 : 2;
+  return unique.sort((left, right) => rank(left.interface) - rank(right.interface)).map((item) => item.address);
 }
 
 function runOpenSsl(args, label) {
@@ -440,8 +444,17 @@ function handleHttps(req, res, token) {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/health') {
+    if (!isAuthorized(req, token)) return writeJson(res, 401, { ok: false, error: 'Невірний код доступу до сервера iPod.' });
+    let libraryReady = true;
+    let libraryMessage = '';
+    try { configuredLibraryRoot(); } catch (error) { libraryReady = false; libraryMessage = error.message || 'Музичну папку на Mac не налаштовано.'; }
     return writeJson(res, 200, {
       ok: true,
+      service: 'ipod-sync',
+      protocolVersion: SYNC_PROTOCOL_VERSION,
+      serverInstanceId: SYNC_SERVER_INSTANCE_ID,
+      libraryReady,
+      libraryMessage,
       ytDlpAvailable: process.env.YT_DLP_BIN ? fs.existsSync(process.env.YT_DLP_BIN) : Boolean(process.env.PATH?.split(path.delimiter).some((part) => fs.existsSync(path.join(part, 'yt-dlp')))),
       ffmpegAvailable: Boolean(process.env.PATH?.split(path.delimiter).some((part) => fs.existsSync(path.join(part, 'ffmpeg'))))
     });

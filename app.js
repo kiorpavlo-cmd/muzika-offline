@@ -120,6 +120,7 @@ let youtubeSearchRequestId = 0;
 let macSyncAbortController = null;
 let macSyncConnectionTimer = null;
 let macSyncConnectionController = null;
+let macSyncSettingsProbeId = 0;
 let macSyncWakeLock = null;
 let macSyncWakeLockRequest = null;
 let macSyncWakeLockWanted = false;
@@ -140,11 +141,31 @@ if (hashDownloadServer) {
   history.replaceState(null, '', `${location.pathname}${location.search}`);
 }
 
+function normalizeMacSyncServer(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) return '';
+    const host = url.hostname.toLowerCase();
+    const localName = host === 'localhost' || host.endsWith('.local');
+    const octets = host.split('.').map((part) => /^\d+$/.test(part) ? Number(part) : -1);
+    const privateIPv4 = octets.length === 4 && octets.every((part) => part >= 0 && part <= 255) && (
+      octets[0] === 10 ||
+      octets[0] === 192 && octets[1] === 168 ||
+      octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31 ||
+      octets[0] === 169 && octets[1] === 254
+    );
+    return localName || privateIPv4 ? url.origin : '';
+  } catch {
+    return '';
+  }
+}
+
 function downloadServerConfig() {
   const server = localStorage.getItem('muzika-download-server') || '';
-  const token = localStorage.getItem('muzika-download-token') || '';
-  if (!server || !token) return null;
-  return { server: server.replace(/\/+$/, ''), token };
+  const token = (localStorage.getItem('muzika-download-token') || '').toLowerCase();
+  const normalizedServer = normalizeMacSyncServer(server);
+  if (!normalizedServer || !/^[a-f0-9]{64}$/.test(token)) return null;
+  return { server: normalizedServer, token };
 }
 
 function formatSyncSize(bytes) {
@@ -206,30 +227,96 @@ function setMacSyncConnection(state, label) {
   if (text) text.textContent = label;
 }
 
-async function checkMacSyncConnection(config, parentSignal) {
-  if (parentSignal?.aborted) return false;
+async function probeMacSyncServer(config, parentSignal) {
+  if (!config) return { connected: false, libraryReady: false, message: 'Ссылка на Mac не сохранена.' };
+  if (parentSignal?.aborted) return { connected: false, libraryReady: false, message: 'Проверка отменена.' };
   const controller = new AbortController();
   macSyncConnectionController = controller;
-  const timeout = setTimeout(() => controller.abort(), 4500);
+  const timeout = setTimeout(() => controller.abort(), 7000);
   const onAbort = () => controller.abort();
   parentSignal?.addEventListener('abort', onAbort, { once: true });
   try {
     const response = await fetch(config.server + '/api/health?sync_ping=' + Date.now(), {
+      method: 'GET',
+      headers: { Authorization: 'Bearer ' + config.token, Accept: 'application/json' },
       cache: 'no-store',
+      credentials: 'omit',
       signal: controller.signal
     });
-    const payload = await response.json();
-    if (!response.ok || payload.ok !== true) throw new Error('Mac server unavailable');
-    if (!parentSignal?.aborted) setMacSyncConnection('connected', 'Подключено к Mac');
-    return true;
+    let payload = null;
+    try { payload = await response.json(); } catch {}
+    if (response.status === 401 || response.status === 403) {
+      return { connected: false, libraryReady: false, message: 'Ключ доступа не принят. Скопируйте новую ссылку подключения с Mac.' };
+    }
+    if (!response.ok) {
+      return { connected: false, libraryReady: false, message: 'Сервер Mac ответил ошибкой (' + response.status + '). Перезапустите синхронизацию на Mac.' };
+    }
+    if (payload?.service !== 'ipod-sync' || payload?.protocolVersion !== 2) {
+      return { connected: false, libraryReady: false, message: 'Сервер найден, но версия синхронизации устарела. Обновите приложение iPod на Mac.' };
+    }
+    if (payload.ok !== true) {
+      return { connected: false, libraryReady: false, message: 'Сервер Mac не подтвердил подключение.' };
+    }
+    if (payload.libraryReady !== true) {
+      return { connected: true, libraryReady: false, message: payload.libraryMessage || 'Mac доступен, но музыкальная папка не настроена.' };
+    }
+    return { connected: true, libraryReady: true, message: 'Mac и музыкальная папка доступны.' };
   } catch {
-    if (!parentSignal?.aborted) setMacSyncConnection('disconnected', 'Нет соединения с Mac');
-    return false;
+    if (parentSignal?.aborted) return { connected: false, libraryReady: false, message: 'Проверка отменена.' };
+    return {
+      connected: false,
+      libraryReady: false,
+      message: 'Mac не отвечает. Подключите iPhone и Mac к одной сети Wi‑Fi. Адрес .local недоступен через 5G или мобильную сеть.'
+    };
   } finally {
     clearTimeout(timeout);
     parentSignal?.removeEventListener('abort', onAbort);
     if (macSyncConnectionController === controller) macSyncConnectionController = null;
   }
+}
+
+async function checkMacSyncConnection(config, parentSignal) {
+  const result = await probeMacSyncServer(config, parentSignal);
+  if (!parentSignal?.aborted) {
+    const label = result.connected && result.libraryReady
+      ? 'Mac и медиатека доступны'
+      : result.connected
+        ? 'Mac доступен, медиатека не готова'
+        : 'Нет подтверждённого соединения с Mac';
+    setMacSyncConnection(result.connected && result.libraryReady ? 'connected' : 'disconnected', label);
+  }
+  return result.connected && result.libraryReady;
+}
+
+function updateMacSyncSettingsStatus(result, checking = false) {
+  const title = $('#mac-sync-settings-title');
+  const detail = $('#mac-sync-settings-status');
+  const syncButton = $('.mac-sync-start');
+  if (!title || !detail || !syncButton) return;
+  if (checking) {
+    title.textContent = 'Проверяю подключение…';
+    detail.textContent = 'Проверяю ответ Mac, ключ доступа и музыкальную папку.';
+    syncButton.disabled = true;
+    return;
+  }
+  if (!result?.connected) title.textContent = 'Нет соединения с Mac';
+  else if (!result.libraryReady) title.textContent = 'Mac отвечает, папка не готова';
+  else title.textContent = 'Mac подключён';
+  detail.textContent = result?.message || 'Вставьте ссылку подключения с Mac.';
+  syncButton.disabled = !(result?.connected && result?.libraryReady);
+}
+
+async function refreshMacSyncSettingsStatus() {
+  const config = downloadServerConfig();
+  const probeId = ++macSyncSettingsProbeId;
+  if (!config) {
+    updateMacSyncSettingsStatus({ connected: false, libraryReady: false, message: 'Вставьте ссылку подключения с Mac и нажмите «Подключить Mac».' });
+    return;
+  }
+  updateMacSyncSettingsStatus(null, true);
+  const result = await probeMacSyncServer(config);
+  if (probeId !== macSyncSettingsProbeId || !$('#mac-sync-settings-status')?.isConnected) return;
+  updateMacSyncSettingsStatus(result);
 }
 
 function stopMacSyncConnectionMonitor() {
@@ -267,12 +354,18 @@ async function openMacSync() {
   root.innerHTML = '<div class="action-modal mac-sync-modal"><section class="mac-sync-sheet" role="dialog" aria-modal="true" aria-labelledby="mac-sync-title"><header><div><h2 id="mac-sync-title">Синхронізація з Mac</h2><div id="mac-sync-connection" class="mac-sync-connection" data-state="checking"><i></i><span>Перевіряю зв’язок…</span></div><p id="mac-sync-status">Отримую список пісень…</p></div><button data-action="close-mac-sync" aria-label="Закрити">×</button></header><div id="mac-sync-progress" class="mac-sync-progress" aria-live="polite"><div class="mac-sync-progress-heading"><strong id="mac-sync-current-title">Підключаюся до Mac…</strong><span id="mac-sync-progress-count">Очікування</span></div><div class="mac-sync-progress-track is-indeterminate" role="progressbar" aria-label="Прогрес синхронізації" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Отримую список пісень"><span id="mac-sync-progress-fill"></span></div><small id="mac-sync-progress-detail">Отримую список пісень…</small></div><div id="mac-sync-list" class="mac-sync-list"><div class="empty-state">Підключення…</div></div><footer><button data-action="close-mac-sync">Закрити</button><button data-action="mac-sync-download" disabled>Завантажити вибрані</button></footer></section></div>';
   const listScreenKeptAwake = await holdMacSyncScreenAwake();
   try {
-    const connected = await checkMacSyncConnection(config, controller.signal);
+    const connection = await probeMacSyncServer(config, controller.signal);
+    setMacSyncConnection(connection.connected && connection.libraryReady ? 'connected' : 'disconnected', connection.message);
     startMacSyncConnectionMonitor(config, controller.signal);
-    if (!connected) throw new Error('Нет соединения с Mac. Проверьте, что iPhone использует правильный адрес Mac и подключён к его сети Wi‑Fi.');
-    const response = await fetch(config.server + '/api/library', { headers: { Authorization: 'Bearer ' + config.token }, signal: controller.signal });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || 'Не вдалося підключитися до Mac.');
+    if (!connection.connected || !connection.libraryReady) throw new Error(connection.message);
+    const response = await fetch(config.server + '/api/library', {
+      headers: { Authorization: 'Bearer ' + config.token, Accept: 'application/json' },
+      cache: 'no-store', credentials: 'omit', signal: controller.signal
+    });
+    let payload = null;
+    try { payload = await response.json(); } catch {}
+    if (response.status === 401 || response.status === 403) throw new Error('Ключ доступа не принят. Скопируйте новую ссылку подключения с Mac.');
+    if (!response.ok) throw new Error(payload?.error || 'Не удалось получить список музыки с Mac.');
     const tracks = Array.isArray(payload.tracks) ? payload.tracks : [];
     const loadingProgress = $('#mac-sync-progress');
     if (loadingProgress) { loadingProgress.hidden = true; $('.mac-sync-progress-track', loadingProgress).classList.remove('is-indeterminate'); }
@@ -344,6 +437,8 @@ async function syncSelectedMacTracks() {
   root.querySelectorAll('[data-mac-track]').forEach((input) => { input.disabled = true; });
   let completed = 0;
   let failed = 0;
+  let transferTimedOut = false;
+  const failureMessages = [];
   const updateProgress = (index, loaded, expected, title, artist) => {
     const trackFraction = expected > 0 ? Math.min(loaded / expected, 1) : 0;
     const value = Math.min(100, Math.round(((index + trackFraction) / selectedIds.length) * 100));
@@ -359,6 +454,7 @@ async function syncSelectedMacTracks() {
   try {
     for (const [index, id] of selectedIds.entries()) {
       if (controller.signal.aborted) break;
+      const transferTimeout = setTimeout(() => { transferTimedOut = true; controller.abort(); }, 180000);
       const metadata = window.__ipodSyncMetadata?.[id] || {};
       const title = metadata.title || metadata.file || 'Без назви';
       const expectedByMetadata = Number(metadata.size) || 0;
@@ -367,9 +463,14 @@ async function syncSelectedMacTracks() {
       try {
         const remote = await fetch(config.server + '/api/library/audio?id=' + encodeURIComponent(id), {
           headers: { Authorization: 'Bearer ' + config.token },
-          signal: controller.signal
+          cache: 'no-store', credentials: 'omit', signal: controller.signal
         });
-        if (!remote.ok) throw new Error('download-failed');
+        if (remote.status === 401 || remote.status === 403) throw new Error('Ключ доступа не принят. Скопируйте новую ссылку с Mac.');
+        if (!remote.ok) {
+          let detail = '';
+          try { detail = (await remote.json()).error || ''; } catch {}
+          throw new Error(detail || ('Mac не передал файл (ошибка ' + remote.status + ').'));
+        }
         const expected = Number(remote.headers.get('Content-Length')) || expectedByMetadata;
         let blob;
         if (remote.body?.getReader) {
@@ -383,6 +484,7 @@ async function syncSelectedMacTracks() {
             loaded += part.value.byteLength;
             updateProgress(index, loaded, expected, title, metadata.artist || '');
           }
+          if (expected > 0 && loaded !== expected) throw new Error('Передача файла оборвалась. Повторите синхронизацию.');
           blob = new Blob(chunks, { type: remote.headers.get('Content-Type') || 'audio/mpeg' });
         } else {
           blob = await remote.blob();
@@ -408,9 +510,12 @@ async function syncSelectedMacTracks() {
         if (oldIndex >= 0) state.localTracks[oldIndex] = track;
         else state.localTracks.push(track);
         saved = true;
-      } catch {
+      } catch (error) {
         if (controller.signal.aborted) break;
         failed += 1;
+        failureMessages.push((title || 'Трек') + ': ' + (error?.message || 'ошибка передачи'));
+      } finally {
+        clearTimeout(transferTimeout);
       }
       completed += 1;
       updateProgress(index, Number(metadata.size) || 1, Number(metadata.size) || 1, title, metadata.artist || '');
@@ -420,14 +525,16 @@ async function syncSelectedMacTracks() {
     if (macSyncAbortController === controller) macSyncAbortController = null;
     await releaseMacSyncScreenWakeLock();
   }
-  if (controller.signal.aborted) return;
+  if (controller.signal.aborted && !transferTimedOut) return;
   window.__ipodSyncMetadata = null;
   if (root.contains(sheet)) {
     root.innerHTML = '';
     stopMacSyncConnectionMonitor();
   }
   render();
-  notify(failed ? 'Синхронізацію завершено. Помилок: ' + failed + '.' : 'Синхронізовано пісень: ' + completed + '.');
+  if (transferTimedOut) notify('Синхронизация остановлена: Mac не передал файл за 3 минуты. Обработано: ' + completed + ' из ' + selectedIds.length + '.');
+  else if (failed) notify('Обработано: ' + completed + ' из ' + selectedIds.length + '. Ошибок: ' + failed + '. ' + failureMessages[0]);
+  else notify('Синхронизировано песен: ' + completed + '.');
 }
 
 async function downloadYouTubeAudio(videoId) {
@@ -1150,14 +1257,14 @@ function renderSettings() {
   const macServer = downloadServerConfig();
   const profileLabel = profile ? safeText(profile.name || profile.email) : 'Моя медіатека';
   const profileSub = profile ? safeText(profile.email) : 'Увійти через Google';
-  const connectedCopy = macServer ? safeText(macServer.server) : 'Вставте посилання з Mac, потім натисніть кнопку';
+  const connectedCopy = macServer ? 'Проверяю сервер и папку медиатеки…' : 'Вставьте ссылку с Mac, чтобы проверить соединение';
   return '<header class="subpage-top"><button class="round-back" data-action="back">' + icon('back') + '</button><h2>Налаштування</h2><span></span></header>' +
     '<button class="settings-profile" data-action="google-account"><span class="profile-button profile-button--large">' + profileAvatarContents(profile) + '</span><span class="settings-profile-copy"><strong>' + profileLabel + '</strong><small>' + profileSub + '</small></span>' + icon('back', 'chevron') + '</button>' +
     '<a class="settings-action-card profile-download" href="./iPod.mobileconfig">' + icon('home') + '<span><strong>Додати iPod на iPhone або iPad</strong><small>Завантажити профіль із піктограмою iPod</small></span>' + icon('back', 'chevron') + '</a>' +
     '<section class="mac-sync-settings"><h3>Синхронізація з Mac</h3><p>Передавайте музику з папки на Mac до офлайн-медіатеки iPod на iPhone через одну мережу Wi‑Fi.</p>' +
     '<label for="download-server-input">Посилання підключення з Mac</label><textarea id="download-server-input" rows="3" placeholder="Вставте посилання зі сторінки iPod на Mac"></textarea>' +
-    '<button class="settings-action-card mac-sync-connect" data-action="save-download-server">' + icon('check') + '<span><strong>' + (macServer ? 'Mac підключено' : 'Підключити Mac') + '</strong><small>' + connectedCopy + '</small></span></button>' +
-    '<button class="settings-action-card mac-sync-start" data-action="mac-sync"' + (macServer ? '' : ' disabled') + '>' + icon('download') + '<span><strong>Синхронізувати музику</strong><small>Виберіть нові або змінені пісні для завантаження</small></span></button>' +
+    '<button class="settings-action-card mac-sync-connect" data-action="save-download-server">' + icon('info') + '<span><strong id="mac-sync-settings-title">' + (macServer ? 'Проверяю подключение…' : 'Подключить Mac') + '</strong><small id="mac-sync-settings-status">' + connectedCopy + '</small></span></button>' +
+    '<button class="settings-action-card mac-sync-start" data-action="mac-sync" disabled>' + icon('download') + '<span><strong>Синхронизировать музыку</strong><small>Кнопка станет доступна после проверки Mac и медиатеки</small></span></button>' +
     (macServer ? '<button class="mac-sync-disconnect" data-action="clear-download-server">Від’єднати Mac</button>' : '') + '</section>';
 }
 
@@ -1577,6 +1684,8 @@ function render() {
   content.classList.toggle('content--category-detail', state.screen.type === 'category' && ['songs', 'albums'].includes(state.screen.category));
   renderTabBar();
   renderPlayer();
+  if (state.screen.type === 'settings') refreshMacSyncSettingsStatus();
+  else macSyncSettingsProbeId += 1;
   content.scrollTop = 0;
   if (state.screen.type === 'tab' && state.screen.tab === 'search' && state.searchText) {
     const input = $('#search-input');
@@ -2079,29 +2188,44 @@ document.addEventListener('click', async (event) => {
     case 'save-download-server': {
       const input = $('#download-server-input');
       const raw = input?.value?.trim() || '';
-      if (!raw) {
-        notify('Вставте посилання зі сторінки налаштування сервера.');
+      let candidate = null;
+      if (raw) {
+        let parsed;
+        try {
+          parsed = new URL(raw.includes('#') ? raw : raw + '#');
+        } catch {
+          notify('Не удалось распознать ссылку.');
+          break;
+        }
+        const params = new URLSearchParams(parsed.hash.replace(/^#/, ''));
+        const server = params.get('muzika-download-server') || '';
+        const token = params.get('muzika-download-token') || '';
+        const normalizedServer = normalizeMacSyncServer(server);
+        const normalizedToken = token.toLowerCase();
+        if (!normalizedServer || !/^[a-f0-9]{64}$/.test(normalizedToken)) {
+          notify('Ссылка iPod с Mac некорректна. Скопируйте её полностью.');
+          break;
+        }
+        candidate = { server: normalizedServer, token: normalizedToken };
+      } else {
+        candidate = downloadServerConfig();
+        if (!candidate) {
+          notify('Вставьте ссылку подключения со страницы iPod на Mac.');
+          break;
+        }
+      }
+      updateMacSyncSettingsStatus(null, true);
+      const connection = await probeMacSyncServer(candidate);
+      updateMacSyncSettingsStatus(connection);
+      if (!connection.connected) {
+        notify(connection.message);
         break;
       }
-      let parsed;
-      try {
-        parsed = new URL(raw.includes('#') ? raw : `${raw}#`);
-      } catch {
-        notify('Не вдалося розпізнати посилання.');
-        break;
-      }
-      const params = new URLSearchParams(parsed.hash.replace(/^#/, ''));
-      const server = params.get('muzika-download-server') || '';
-      const token = params.get('muzika-download-token') || '';
-      if (!server || !token || !server.startsWith('https://') || !/^[a-f0-9]{64}$/i.test(token)) {
-        notify('Посилання iPod з Mac некоректне. Скопіюйте його повністю.');
-        break;
-      }
-      localStorage.setItem('muzika-download-server', server.replace(/\/+$/, ''));
-      localStorage.setItem('muzika-download-token', token);
+      localStorage.setItem('muzika-download-server', candidate.server);
+      localStorage.setItem('muzika-download-token', candidate.token);
       closeSongMenu();
       render();
-      notify('iPod на Mac підключено.');
+      notify(connection.libraryReady ? 'Mac подключён, музыкальная папка доступна.' : connection.message);
       break;
     }
     case 'clear-download-server':
