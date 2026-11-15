@@ -11,6 +11,7 @@ const { after, before, test } = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const serverPath = path.join(root, 'server.js');
+const { sortLanInterfaceAddresses } = require(serverPath);
 let tempRoot;
 let libraryRoot;
 let child;
@@ -60,10 +61,10 @@ function waitForReady() {
   });
 }
 
-function httpsGet(requestPath, headers = {}) {
+function httpsRequest(method, requestPath, headers = {}) {
   return new Promise((resolve, reject) => {
-    const request = https.get({
-      hostname: '127.0.0.1', port, path: requestPath, headers,
+    const request = https.request({
+      hostname: '127.0.0.1', port, path: requestPath, method, headers,
       rejectUnauthorized: false, agent: false
     }, (response) => {
       const chunks = [];
@@ -75,7 +76,12 @@ function httpsGet(requestPath, headers = {}) {
       }));
     });
     request.on('error', reject);
+    request.end();
   });
+}
+
+function httpsGet(requestPath, headers = {}) {
+  return httpsRequest('GET', requestPath, headers);
 }
 
 function httpGet(requestPath) {
@@ -122,6 +128,14 @@ after(async () => {
   if (tempRoot) await fs.rm(tempRoot, { recursive: true, force: true });
 });
 
+test('prefers the Mac address on the active gateway subnet', () => {
+  const ordered = sortLanInterfaceAddresses([
+    { interface: 'en0', address: '192.168.0.250', netmask: '255.255.255.0' },
+    { interface: 'en0', address: '172.20.10.4', netmask: '255.255.255.240' }
+  ], { interface: 'en0', gateway: '172.20.10.1' });
+  assert.equal(ordered[0].address, '172.20.10.4');
+});
+
 test('one HTTPS server exposes authenticated health and the music library', async () => {
   const unauthenticated = await httpsGet('/api/health');
   assert.equal(unauthenticated.status, 401);
@@ -138,6 +152,18 @@ test('one HTTPS server exposes authenticated health and the music library', asyn
   const tracks = JSON.parse(library.body).tracks;
   assert.equal(tracks.length, 1);
   assert.equal(tracks[0].title, 'Test Track');
+});
+
+test('the HTTPS server allows GitHub Pages preflight for a private-network sync endpoint', async () => {
+  const preflight = await httpsRequest('OPTIONS', '/api/health', {
+    Origin: 'https://kiorpavlo-cmd.github.io',
+    'Access-Control-Request-Method': 'GET',
+    'Access-Control-Request-Headers': 'authorization',
+    'Access-Control-Request-Private-Network': 'true'
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers['access-control-allow-origin'], 'https://kiorpavlo-cmd.github.io');
+  assert.equal(preflight.headers['access-control-allow-private-network'], 'true');
 });
 
 test('the same HTTPS server provides the AirDrop setup profile and saved connection', async () => {

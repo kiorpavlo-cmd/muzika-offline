@@ -44,16 +44,214 @@ function writeJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function ipv4Number(value) {
+  const parts = String(value || '').split('.');
+  if (parts.length !== 4 || parts.some((part) => !/^\d+$/.test(part) || Number(part) > 255)) return null;
+  return parts.reduce((number, part) => ((number << 8) | Number(part)) >>> 0, 0);
+}
+
+function isAddressOnSubnet(address, netmask, peer) {
+  const ip = ipv4Number(address);
+  const mask = ipv4Number(netmask);
+  const other = ipv4Number(peer);
+  return ip !== null && mask !== null && other !== null && (ip & mask) === (other & mask);
+}
+
+function getDefaultIPv4Route() {
+  try {
+    const table = execFileSync('netstat', ['-rn', '-f', 'inet'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const row = table.split(/\r?\n/).map((line) => line.trim().split(/\s+/)).find((columns) => columns[0] === 'default' && columns.length >= 4);
+    return row ? { gateway: row[1], interface: row[3] } : null;
+  } catch {
+    return null;
+  }
+}
+
+function sortLanInterfaceAddresses(addresses, defaultRoute = null) {
+  const rank = (name) => name === 'en0' ? 0 : /^en\d+$/.test(name) ? 1 : /^bridge\d+$/.test(name) ? 2 : /^utun\d+$/.test(name) ? 3 : 2;
+  return [...addresses].sort((left, right) => {
+    const leftUsesDefaultRoute = defaultRoute?.interface === left.interface && isAddressOnSubnet(left.address, left.netmask, defaultRoute.gateway);
+    const rightUsesDefaultRoute = defaultRoute?.interface === right.interface && isAddressOnSubnet(right.address, right.netmask, defaultRoute.gateway);
+    if (leftUsesDefaultRoute !== rightUsesDefaultRoute) return leftUsesDefaultRoute ? -1 : 1;
+    return rank(left.interface) - rank(right.interface);
+  });
+}
+
 function getLanInterfaceAddresses() {
   const addresses = [];
   for (const [name, entries] of Object.entries(os.networkInterfaces())) {
     for (const entry of entries || []) {
-      if (entry.family === 'IPv4' && !entry.internal) addresses.push({ interface: name, address: entry.address });
+      if (entry.family === 'IPv4' && !entry.internal) addresses.push({ interface: name, address: entry.address, netmask: entry.netmask });
     }
   }
   const unique = [...new Map(addresses.map((item) => [item.address, item])).values()];
-  const rank = (name) => name === 'en0' ? 0 : /^en\d+$/.test(name) ? 1 : /^bridge\d+$/.test(name) ? 2 : /^utun\d+$/.test(name) ? 3 : 2;
-  return unique.sort((left, right) => rank(left.interface) - rank(right.interface));
+  return sortLanInterfaceAddresses(unique, getDefaultIPv4Route());
+}
+
+function preferredSyncPort() {
+  if (process.env.MUZIKA_PORT) return HTTPS_PORT;
+  try {
+    const value = Number(fs.readFileSync(path.join(CERT_DIR, 'server-port'), 'utf8').trim());
+    if (Number.isInteger(value) && value >= 1024 && value <= 65535) return value;
+  } catch {}
+  return HTTPS_PORT;
+}
+
+function persistSyncPort(port) {
+  if (process.env.MUZIKA_PORT) return;
+  try {
+    const portFile = path.join(CERT_DIR, 'server-port');
+    fs.writeFileSync(portFile, `${port}\n`, { mode: 0o600 });
+    fs.chmodSync(portFile, 0o600);
+  } catch (error) {
+    console.warn('IPOD_SYNC_PORT_SAVE_ERROR:' + error.message);
+  }
+}
+
+function findTailscaleCli() {
+  const candidates = [
+    process.env.TAILSCALE_BIN,
+    '/opt/homebrew/bin/tailscale',
+    '/usr/local/bin/tailscale',
+    '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+    ...(process.env.PATH || '').split(path.delimiter).filter(Boolean).map((directory) => path.join(directory, 'tailscale'))
+  ].filter(Boolean);
+  return candidates.find((candidate) => {
+    try {
+      return fs.statSync(candidate).isFile() && fs.accessSync(candidate, fs.constants.X_OK) === undefined;
+    } catch {
+      return false;
+    }
+  }) || '';
+}
+
+function readTailscaleJson(cliPath, args) {
+  try {
+    const output = execFileSync(cliPath, args, {
+      encoding: 'utf8',
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    return { ok: true, value: JSON.parse(output) };
+  } catch {
+    return { ok: false, value: null };
+  }
+}
+
+function hasConfiguredServeValue(value) {
+  if (value === null || value === undefined || value === false) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (typeof value === 'number') return value !== 0;
+  if (Array.isArray(value)) return value.some(hasConfiguredServeValue);
+  if (typeof value === 'object') return Object.values(value).some(hasConfiguredServeValue);
+  return Boolean(value);
+}
+
+function inspectTailscaleServe() {
+  const cliPath = findTailscaleCli();
+  if (!cliPath) {
+    return { ready: false, message: 'Установите Tailscale на Mac и iPhone и войдите в один tailnet. После этого включите MagicDNS и HTTPS Certificates для tailnet; пока используется локальное подключение.' };
+  }
+
+  const statusResult = readTailscaleJson(cliPath, ['status', '--json']);
+  const status = statusResult.value;
+  if (!statusResult.ok || status?.BackendState !== 'Running') {
+    return { ready: false, message: 'Подключите Mac к Tailscale и включите MagicDNS и HTTPS Certificates для tailnet; пока используется локальное подключение.' };
+  }
+
+  const dnsName = String(status.Self?.DNSName || '').replace(/\.$/, '').toLowerCase();
+  if (!dnsName || !/^[a-z0-9.-]+\.ts\.net$/.test(dnsName) || dnsName.includes('..')) {
+    return { ready: false, message: 'Tailscale не сообщил HTTPS-имя Mac. Включите MagicDNS и HTTPS Certificates; пока используется локальное подключение.' };
+  }
+
+  const serveResult = readTailscaleJson(cliPath, ['serve', 'status', '--json']);
+  if (!serveResult.ok) {
+    return { ready: false, message: 'Не удалось проверить Tailscale Serve. Его конфигурация не менялась; используется локальное подключение.' };
+  }
+  if (hasConfiguredServeValue(serveResult.value)) {
+    return { ready: false, message: 'Tailscale Serve уже настроен. Его конфигурация не менялась; используется локальное подключение.' };
+  }
+
+  return { ready: true, cliPath, dnsName };
+}
+
+function startTailscaleServe(cliPath, dnsName, port, handlers) {
+  const child = spawn(cliPath, ['serve', '--https=443', `https+insecure://127.0.0.1:${port}`], {
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let output = '';
+  let ready = false;
+  let settled = false;
+  const timeout = setTimeout(() => fail('Tailscale Serve не подтвердил запуск. Включите HTTPS Certificates для tailnet; используется локальное подключение.'), 15000);
+
+  function stopChild() {
+    if (child.exitCode === null && !child.killed) child.kill('SIGINT');
+  }
+
+  function fail(message) {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    stopChild();
+    handlers.unavailable(message);
+  }
+
+  function consume(chunk) {
+    // CLI output can contain login or consent URLs; inspect it in memory only and never log it.
+    output = (output + chunk.toString()).slice(-8192);
+    if (settled || ready) return;
+    if (output.toLowerCase().includes(`https://${dnsName}`) && output.includes(`127.0.0.1:${port}`)) {
+      settled = true;
+      ready = true;
+      clearTimeout(timeout);
+      handlers.ready(child, `https://${dnsName}`);
+    }
+  }
+
+  child.stdout.on('data', consume);
+  child.stderr.on('data', consume);
+  child.once('error', () => fail('Не удалось запустить Tailscale Serve; используется локальное подключение.'));
+  child.once('exit', (code) => {
+    clearTimeout(timeout);
+    if (!ready && !settled) {
+      settled = true;
+      handlers.unavailable(code === 0
+        ? 'Tailscale Serve завершился до публикации адреса; используется локальное подключение.'
+        : 'Tailscale Serve не готов. Проверьте HTTPS Certificates в настройках tailnet; используется локальное подключение.');
+      return;
+    }
+    if (ready) handlers.stopped();
+  });
+  return child;
+}
+
+function installTailscaleShutdownHandlers(child) {
+  let stopping = false;
+  const shutdown = (signal) => {
+    if (stopping) return;
+    stopping = true;
+    const exitCode = signal === 'SIGINT' ? 130 : 143;
+    if (child.exitCode !== null) {
+      process.exit(exitCode);
+      return;
+    }
+    const forceExit = setTimeout(() => process.exit(exitCode), 2500);
+    forceExit.unref();
+    child.once('exit', () => process.exit(exitCode));
+    if (!child.killed) child.kill('SIGINT');
+  };
+  const onSigint = () => shutdown('SIGINT');
+  const onSigterm = () => shutdown('SIGTERM');
+  const onExit = () => { if (child.exitCode === null && !child.killed) child.kill('SIGINT'); };
+  process.once('SIGINT', onSigint);
+  process.once('SIGTERM', onSigterm);
+  process.once('exit', onExit);
+  child.once('exit', () => {
+    process.removeListener('SIGINT', onSigint);
+    process.removeListener('SIGTERM', onSigterm);
+    process.removeListener('exit', onExit);
+  });
 }
 
 function runOpenSsl(args, label) {
@@ -197,12 +395,13 @@ function createCertificates() {
   const token = fs.readFileSync(tokenPath, 'utf8').trim();
 
   const caDer = execFileSync('openssl', ['x509', '-in', caCert, '-outform', 'DER']).toString('base64');
-  const primaryAddress = lanInterfaces[0]?.address || hostname;
+  // Bonjour keeps the iPhone endpoint valid when DHCP changes the Mac's IP.
+  const primaryAddress = hostname || lanInterfaces[0]?.address;
   const serverOrigin = `https://${primaryAddress}:${HTTPS_PORT}`;
   const profile = buildSyncProfile(caDer, token, serverOrigin);
 
   fs.writeFileSync(path.join(CERT_DIR, 'install-ca.mobileconfig'), profile, { mode: 0o600 });
-  return { caCert, serverCert, serverKey, hostname, lanAddresses, lanInterfaces, token, profile };
+  return { caCert, serverCert, serverKey, hostname, lanAddresses, lanInterfaces, token, profile, caDer };
 }
 
 function readJsonBody(req) {
@@ -250,6 +449,9 @@ function applyApiCors(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Max-Age', '600');
+  if (req.headers['access-control-request-private-network'] === 'true') {
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  }
   res.setHeader('Vary', 'Origin');
   return true;
 }
@@ -508,10 +710,14 @@ function requestDownload(req, res, token) {
   });
 }
 
-function handleHttps(req, res, token) {
+function handleHttps(req, res, token, { apiOnly = false } = {}) {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   const url = new URL(req.url, `https://${req.headers.host || 'localhost'}`);
+
+  if (apiOnly && !url.pathname.startsWith('/api/')) {
+    return writeJson(res, 404, { error: 'Ресурс доступний лише через локальне підключення.' });
+  }
 
   if (url.pathname.startsWith('/api/')) {
     const corsAllowed = applyApiCors(req, res);
@@ -610,43 +816,141 @@ function handleSetup(req, res, profile, hostname, lanAddresses, token, port) {
 
 function main() {
   const certs = createCertificates();
+  const tailscale = inspectTailscaleServe();
   const tlsOptions = {
     key: fs.readFileSync(certs.serverKey),
     cert: fs.readFileSync(certs.serverCert),
     ca: fs.readFileSync(certs.caCert)
   };
 
-  let activePort = HTTPS_PORT;
+  let activePort = preferredSyncPort();
+  let activeMode = 'local';
+  let activeSetupMessage = tailscale.ready ? '' : tailscale.message;
+  let listenIntent = tailscale.ready ? 'tailscale' : 'local';
+  let portFallbackAttempted = false;
+  let tailscaleProcess = null;
   const secureServer = https.createServer(tlsOptions, (req, res) => {
     const requestUrl = new URL(req.url, `https://${req.headers.host || 'localhost'}`);
+    if (activeMode === 'tailscale') {
+      return handleHttps(req, res, certs.token, { apiOnly: true });
+    }
     if (requestUrl.pathname === '/setup' || requestUrl.pathname === '/install-ca.mobileconfig') {
       return handleSetup(req, res, certs.profile, certs.hostname, certs.lanAddresses, certs.token, activePort);
     }
     return handleHttps(req, res, certs.token);
   });
-  secureServer.on('error', (error) => console.error('IPOD_SYNC_ERROR:' + error.message));
-  secureServer.listen(HTTPS_PORT, HOST, () => {
-      activePort = secureServer.address().port;
-      const primary = certs.lanInterfaces[0] || { interface: 'local', address: certs.hostname };
-      const endpoint = {
-        address: primary.address,
-        interface: primary.interface,
-        certificate: `https://${primary.address}:${activePort}/install-ca.mobileconfig`,
-        connection: pwaConnectionUrl(`https://${primary.address}:${activePort}`, certs.token)
-      };
-      console.log(`Єдиний сервер iPod працює: https://${primary.address}:${activePort}`);
-      if (!process.env.PATH?.split(path.delimiter).some((part) => fs.existsSync(path.join(part, 'yt-dlp')))) {
-        console.warn('Не знайдено yt-dlp. Встановіть його командою: brew install yt-dlp');
-      }
-      if (!process.env.PATH?.split(path.delimiter).some((part) => fs.existsSync(path.join(part, 'ffmpeg')))) {
-        console.warn('Не знайдено ffmpeg. Встановіть його командою: brew install ffmpeg');
-      }
-      console.log('Завантажені аудіофайли зберігаються у локальній медіатеці застосунку на пристрої.');
-      console.log('IPOD_SYNC_READY:' + JSON.stringify([endpoint]));
+
+  const reportMediaTools = () => {
+    if (!process.env.PATH?.split(path.delimiter).some((part) => fs.existsSync(path.join(part, 'yt-dlp')))) {
+      console.warn('Не знайдено yt-dlp. Встановіть його командою: brew install yt-dlp');
+    }
+    if (!process.env.PATH?.split(path.delimiter).some((part) => fs.existsSync(path.join(part, 'ffmpeg')))) {
+      console.warn('Не знайдено ffmpeg. Встановіть його командою: brew install ffmpeg');
+    }
+    console.log('Завантажені аудіофайли зберігаються у локальній медіатеці застосунку на пристрої.');
+  };
+
+  const publishLocalEndpoint = () => {
+    activePort = secureServer.address().port;
+    persistSyncPort(activePort);
+    const primary = certs.lanInterfaces[0] || { interface: 'local', address: certs.hostname };
+    const profile = buildSyncProfile(certs.caDer, certs.token, `https://${primary.address}:${activePort}`);
+    fs.writeFileSync(path.join(CERT_DIR, 'install-ca.mobileconfig'), profile, { mode: 0o600 });
+    const endpoint = {
+      mode: 'local',
+      address: primary.address,
+      interface: primary.interface,
+      certificate: `https://${primary.address}:${activePort}/install-ca.mobileconfig`,
+      connection: pwaConnectionUrl(`https://${primary.address}:${activePort}`, certs.token),
+      profile: 'install-ca.mobileconfig',
+      ...(activeSetupMessage ? { setupMessage: activeSetupMessage } : {})
+    };
+    console.log(`Єдиний сервер iPod працює: https://${primary.address}:${activePort}`);
+    reportMediaTools();
+    console.log('IPOD_SYNC_READY:' + JSON.stringify([endpoint]));
+  };
+
+  const publishTailscaleEndpoint = (origin) => {
+    activePort = secureServer.address().port;
+    persistSyncPort(activePort);
+    const endpoint = {
+      mode: 'tailscale',
+      address: tailscale.dnsName,
+      interface: 'tailscale',
+      connection: pwaConnectionUrl(origin, certs.token),
+      setupMessage: 'Откройте iPod на iPhone, нажмите «Подключить с буфера обмена» и подтвердите системную вставку.'
+    };
+    console.log('Tailscale Serve готов; локальная точка синхронизации доступна только через loopback.');
+    reportMediaTools();
+    console.log('IPOD_SYNC_READY:' + JSON.stringify([endpoint]));
+  };
+
+  const listenLocal = (port) => {
+    activeMode = 'local';
+    listenIntent = 'local';
+    try {
+      secureServer.listen(port, HOST, publishLocalEndpoint);
+    } catch (error) {
+      handleListenError(error);
+    }
+  };
+
+  const fallbackToLocal = (message) => {
+    activeSetupMessage = message;
+    activeMode = 'local';
+    listenIntent = 'local';
+    const listen = () => listenLocal(preferredSyncPort());
+    if (secureServer.listening) secureServer.close(listen);
+    else listen();
+  };
+
+  const beginTailscaleServe = () => {
+    activePort = secureServer.address().port;
+    persistSyncPort(activePort);
+    activeMode = 'tailscale';
+    tailscaleProcess = startTailscaleServe(tailscale.cliPath, tailscale.dnsName, activePort, {
+      ready: (child, origin) => {
+        tailscaleProcess = child;
+        installTailscaleShutdownHandlers(child);
+        publishTailscaleEndpoint(origin);
+      },
+      unavailable: (message) => fallbackToLocal(message),
+      stopped: () => fallbackToLocal('Tailscale Serve остановился. Проверьте Tailscale; используется локальное подключение.')
     });
+  };
+
+  function handleListenError(error) {
+    const message = `IPOD_SYNC_ERROR:${error.message}`;
+    if (listenIntent === 'tailscale') {
+      fallbackToLocal('Tailscale endpoint не удалось подготовить. Используется локальное подключение с профилем сертификата.');
+      return;
+    }
+    if (error.code === 'EADDRINUSE' && !portFallbackAttempted) {
+      portFallbackAttempted = true;
+      activeSetupMessage = [activeSetupMessage, 'Стандартный порт занят; локальный сервер использует свободный порт.'].filter(Boolean).join(' ');
+      listenLocal(0);
+      return;
+    }
+    process.stderr.write(`${message}\n`, () => process.exit(1));
+  }
+
+  secureServer.on('error', (error) => {
+    if (error.syscall === 'listen') return handleListenError(error);
+    console.error(`IPOD_SYNC_ERROR:${error.message}`);
+  });
+
+  if (tailscale.ready) {
+    try {
+      secureServer.listen(activePort, '127.0.0.1', beginTailscaleServe);
+    } catch (error) {
+      handleListenError(error);
+    }
+  } else {
+    listenLocal(activePort);
+  }
   return secureServer;
 }
 
 if (require.main === module) main();
 
-module.exports = { buildSyncProfile, createCertificates, getLanInterfaceAddresses, handleHttps, main, pwaConnectionUrl };
+module.exports = { buildSyncProfile, createCertificates, getDefaultIPv4Route, getLanInterfaceAddresses, handleHttps, main, pwaConnectionUrl, sortLanInterfaceAddresses };

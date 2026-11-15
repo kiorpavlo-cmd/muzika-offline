@@ -34,6 +34,29 @@ private struct BackendFailure: Error, LocalizedError {
     var errorDescription: String? { message }
 }
 
+private struct TailscaleSyncResult {
+    var endpoint: [String: Any]?
+    var message: String
+}
+
+private final class CapturedProcessOutput {
+    private let lock = NSLock()
+    private var bytes = Data()
+
+    func replace(with data: Data) {
+        lock.lock()
+        bytes = data
+        lock.unlock()
+    }
+
+    func string() -> String {
+        lock.lock()
+        let snapshot = bytes
+        lock.unlock()
+        return String(decoding: snapshot, as: UTF8.self)
+    }
+}
+
 private enum ShazamRecognitionResult {
     case match(SHMatch)
     case noMatch
@@ -79,6 +102,8 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
     private var syncServerProcess: Process?
     private var syncServerOutputPipe: Pipe?
     private var syncServerOutputBuffer = Data()
+    private var syncServerLastError: String?
+    private var syncServerStopRequested = false
     private let syncServerOutputQueue = DispatchQueue(label: "local.audiolibrarytagger.sync-output")
     private let lineQueue = DispatchQueue(label: "local.audiolibrarytagger.backend-output")
     private var pendingOutput = Data()
@@ -122,11 +147,9 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
     private var selectedPath: String?
     private var currentCoverData: Data?
     private var currentCoverMime = "image/jpeg"
-    private var acoustidKey = ""
     private var isBusy = false
     private var requestSequence = 0
     private var pendingBackend: [String: (Result<[String: Any], BackendFailure>) -> Void] = [:]
-    private var activeSearchRequestID: String?
     private var searchGeneration = 0
     private var coverGeneration = 0
     private var currentCandidate: [String: Any]?
@@ -138,12 +161,18 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
     private var candidateRetryButton: NSButton?
     private var syncWindow: NSWindow?
     private var syncStatusLabel: NSTextField?
+    private var syncIntroductionLabel: NSTextField?
+    private var syncSetupMessageLabel: NSTextField?
     private var syncConnectionField: NSTextField?
     private var syncLogView: NSTextView?
     private var syncStartButton: NSButton?
     private var syncStopButton: NSButton?
     private var syncProfileButton: NSButton?
     private var syncEndpoints: [[String: Any]] = []
+    private let tailscaleSyncQueue = DispatchQueue(label: "local.audiolibrarytagger.tailscale-sync", qos: .utility)
+    private var tailscaleSyncGeneration = 0
+    private var tailscaleSyncMessage: String?
+    private var tailscaleSyncInProgress = false
     private var activeSearchPath: String?
     private var keyboardMonitor: Any?
     private var didInitializeMainWindow = false
@@ -170,7 +199,6 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.installBundledAcoustIDKeyIfNeeded()
             self.startBackend()
             self.requestBackend("settings") { [weak self] result in
                 guard let self, case .success(let settings) = result else {
@@ -178,7 +206,6 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
                     return
                 }
                 self.folderField.stringValue = settings["folder"] as? String ?? ""
-                self.acoustidKey = settings["api_key"] as? String ?? ""
                 self.restoreCache(announce: true)
                 self.startSyncServer()
             }
@@ -436,14 +463,14 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         coverView.alignment = .center
 
         playButton = NSButton(title: "▶ Воспроизвести · Пробел", target: self, action: #selector(playSelected))
-        searchButton = NSButton(title: "Найти совпадение", target: self, action: #selector(searchSelected))
+        searchButton = NSButton(title: "Найти в Shazam", target: self, action: #selector(searchSelected))
         writeButton = NSButton(title: "Записать теги", target: self, action: #selector(writeTags))
-        autoButton = NSButton(title: "Автообработка папки", target: self, action: #selector(autoProcess))
+        autoButton = NSButton(title: "Автообработка Shazam", target: self, action: #selector(autoProcess))
         writeButton.bezelStyle = .rounded
         autoButton.bezelStyle = .rounded
         let actions = verticalStack(spacing: 7)
         actions.alignment = .width
-        [playButton!, searchButton!, writeButton!, autoButton!].forEach { button in
+        [playButton!, searchButton!].forEach { button in
             actions.addArrangedSubview(button)
         }
         writeButton.setButtonType(.momentaryPushIn)
@@ -519,39 +546,6 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         button.bezelStyle = .texturedRounded
         button.setContentHuggingPriority(.required, for: .horizontal)
         return button
-    }
-
-    private func installBundledAcoustIDKeyIfNeeded() {
-        guard let clientKey = Bundle.main.object(forInfoDictionaryKey: "AcoustIDClientKey") as? String,
-              !clientKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let supportDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return
-        }
-
-        let settingsURL = supportDirectory
-            .appendingPathComponent("Audio Library Tagger", isDirectory: true)
-            .appendingPathComponent("settings.json")
-        var settings: [String: Any] = [:]
-        if let data = try? Data(contentsOf: settingsURL),
-           let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            settings = saved
-        }
-        if let existingKey = settings["acoustid_key"] as? String,
-           !existingKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return
-        }
-
-        settings["acoustid_key"] = clientKey
-        do {
-            try FileManager.default.createDirectory(
-                at: settingsURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            let data = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: settingsURL, options: .atomic)
-        } catch {
-            NSLog("Could not save the bundled AcoustID client key: %@", error.localizedDescription)
-        }
     }
 
     private func installApplicationMenu() {
@@ -638,15 +632,11 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
 
     private func handleBackendMessage(_ message: [String: Any]) {
         guard let event = message["event"] as? String else { return }
-        let requestID = String(describing: message["id"] ?? "")
         if event == "progress" {
-            if requestID == activeSearchRequestID, let data = message["data"] as? [String: Any], data["phase"] as? String == "search" {
-                setStatus(data["message"] as? String ?? "Поиск выполняется…", color: .controlAccentColor)
-                return
-            }
             handleProgress(message["data"] as? [String: Any] ?? [:])
             return
         }
+        let requestID = String(describing: message["id"] ?? "")
         guard let completion = pendingBackend.removeValue(forKey: requestID) else { return }
         if event == "error" {
             completion(.failure(BackendFailure(message: message["error"] as? String ?? "Ошибка модуля обработки.")))
@@ -831,12 +821,8 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         let wasSearching = activeSearchPath != nil
         searchGeneration += 1
         activeSearchPath = nil
-        if let requestID = activeSearchRequestID {
-            requestBackend("cancel_search", payload: ["target_id": requestID]) { _ in }
-            activeSearchRequestID = nil
-        }
         if wasSearching {
-            searchButton?.title = "Найти совпадение"
+            searchButton?.title = "Найти в Shazam"
             setBusy(false)
             setStatus("Поиск остановлен: выбран другой трек.")
         }
@@ -940,7 +926,7 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
     @objc private func folderPathEntered() {
         let folder = folderField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         folderField.stringValue = folder
-        requestBackend("save_settings", payload: ["folder": folder, "api_key": acoustidKey]) { [weak self] _ in
+        requestBackend("save_settings", payload: ["folder": folder]) { [weak self] _ in
             guard let self else { return }
             self.libraryRows = []
             self.reloadLibraryTable()
@@ -1003,48 +989,28 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         searchGeneration += 1
         let generation = searchGeneration
         activeSearchPath = path
-        activeSearchRequestID = nil
         setBusy(true)
         searchButton.title = "Поиск…"
-        setStatus("Сначала ищу в каталоге Shazam…", color: .controlAccentColor)
+        setStatus("Ищу только в каталоге Shazam…", color: .controlAccentColor)
         searchWithShazam(path: path) { [weak self] result in
             guard let self, self.searchGeneration == generation, self.selectedPath == path else { return }
             switch result {
             case .success(let candidates) where !candidates.isEmpty:
                 self.finishTrackSearch(path: path, candidates: candidates, warning: "", generation: generation)
             case .success:
-                self.searchWithCatalog(path: path, generation: generation, shazamWarning: "")
+                self.finishTrackSearch(path: path, candidates: [], warning: "Shazam не нашёл совпадение.", generation: generation)
             case .failure(let error):
                 let detail = error.localizedDescription.contains("com.apple.ShazamKit error 202")
                     ? "сервер каталога не ответил (ошибка 202)" : error.localizedDescription
-                self.searchWithCatalog(path: path, generation: generation, shazamWarning: "Shazam временно недоступен: \(detail)")
+                self.finishTrackSearch(path: path, candidates: [], warning: "Shazam временно недоступен: \(detail)", generation: generation)
             }
         }
-    }
-
-    private func searchWithCatalog(path: String, generation: Int, shazamWarning: String) {
-        guard searchGeneration == generation, selectedPath == path else { return }
-        setStatus("Shazam не нашёл совпадение. Проверяю AcoustID и музыкальные каталоги…", color: .controlAccentColor)
-        let requestID = requestBackend("search", payload: ["path": path, "api_key": acoustidKey]) { [weak self] result in
-            guard let self, self.searchGeneration == generation, self.selectedPath == path else { return }
-            self.activeSearchRequestID = nil
-            switch result {
-            case .success(let value):
-                let candidates = value["candidates"] as? [[String: Any]] ?? []
-                let warning = value["warning"] as? String ?? ""
-                self.finishTrackSearch(path: path, candidates: candidates, warning: [shazamWarning, warning].filter { !$0.isEmpty }.joined(separator: " "), generation: generation)
-            case .failure(let error):
-                self.finishTrackSearch(path: path, candidates: [], warning: [shazamWarning, error.message].filter { !$0.isEmpty }.joined(separator: " "), generation: generation)
-            }
-        }
-        activeSearchRequestID = requestID
     }
 
     private func finishTrackSearch(path: String, candidates: [[String: Any]], warning: String, generation: Int) {
         guard searchGeneration == generation, selectedPath == path else { return }
         activeSearchPath = nil
-        activeSearchRequestID = nil
-        searchButton.title = "Найти совпадение"
+        searchButton.title = "Найти в Shazam"
         setBusy(false)
         showCandidateWindow(candidates: candidates, warning: warning)
     }
@@ -1052,7 +1018,7 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
     private func showCandidateWindow(candidates: [[String: Any]], warning: String) {
         candidateRows = candidates.map(preparedCandidate)
         currentCandidate = nil
-        if let certainCandidate = candidateRows.first(where: isCertainShazam) {
+        if let certainCandidate = candidateRows.first(where: { isCertainShazam($0) && missingMetadataFields($0).isEmpty }) {
             currentCandidate = certainCandidate
             setStatus("Shazam распознал запись на 100%. Автоматически записываю теги и обложку…", color: .controlAccentColor)
             writeChosenCandidate()
@@ -1145,7 +1111,7 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         let candidate = candidateRows[row]
         let missing = missingMetadataFields(candidate)
         currentCandidate = candidate
-        if isCertainShazam(candidate) {
+        if isCertainShazam(candidate), missing.isEmpty {
             candidateStatusLabel?.stringValue = "Shazam распознал запись на 100%. Автоматически записываю теги и обложку…"
             candidateStatusLabel?.textColor = .systemGreen
             writeChosenCandidate()
@@ -1201,8 +1167,6 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
             confidence = number.doubleValue
         } else if let text = candidate["confidence"] as? String, let parsed = Double(text) {
             confidence = parsed
-        } else if let number = candidate["acoustid_score"] as? NSNumber {
-            confidence = number.doubleValue
         } else {
             confidence = 0
         }
@@ -1236,7 +1200,7 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
     @objc private func writeChosenCandidate() {
         guard let candidate = currentCandidate, let path = selectedPath else { return }
         let missing = missingMetadataFields(candidate)
-        guard missing.isEmpty || isCertainShazam(candidate) else {
+        guard missing.isEmpty else {
             candidateStatusLabel?.stringValue = "Не удалось получить: \(missing.joined(separator: ", ")). Неполные теги не записаны."
             candidateStatusLabel?.textColor = .systemRed
             return
@@ -1260,7 +1224,7 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
                 return (key, key == "genre" ? self.normalizeGenre(chosen) : chosen)
             })
             let finalMissing = self.missingMetadataFields(finalValues)
-            guard finalMissing.isEmpty || self.isCertainShazam(candidate) else {
+            guard finalMissing.isEmpty else {
                 self.setBusy(false)
                 self.setStatus("Не записываю неполные теги: не удалось получить \(finalMissing.joined(separator: ", ")).", color: .systemRed)
                 return
@@ -1296,27 +1260,15 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
             }
         }
 
-        if (candidate["source"] as? String) == "Shazam" {
-            let urls = [candidate["artwork_url"] as? String ?? "", candidate["apple_artwork_url"] as? String ?? ""].filter { !$0.isEmpty }
-            downloadArtwork(from: urls, index: 0) { data, mime, warning in
-                let values = Dictionary(uniqueKeysWithValues: ["artist", "title", "album", "year", "genre"].map { ($0, candidate[$0] as? String ?? "") })
-                accept(values, data, mime, warning)
-            }
-        } else {
-            requestBackend("select_candidate", payload: ["candidate": candidate]) { result in
-                switch result {
-                case .success(let response):
-                    let values = response["values"] as? [String: Any] ?? candidate
-                    let encoded = response["cover"] as? String ?? ""
-                    let cover = Data(base64Encoded: encoded)
-                    accept(values, cover, response["cover_mime"] as? String ?? "image/jpeg", response["warning"] as? String ?? "")
-                case .failure(let error):
-                    DispatchQueue.main.async {
-                        self.setBusy(false)
-                        self.setStatus("Не удалось получить данные записи: \(error.message)", color: .systemRed)
-                    }
-                }
-            }
+        guard (candidate["source"] as? String) == "Shazam" else {
+            setBusy(false)
+            setStatus("Поддерживается только поиск через Shazam.", color: .systemRed)
+            return
+        }
+        let urls = [candidate["artwork_url"] as? String ?? "", candidate["apple_artwork_url"] as? String ?? ""].filter { !$0.isEmpty }
+        downloadArtwork(from: urls, index: 0) { data, mime, warning in
+            let values = Dictionary(uniqueKeysWithValues: ["artist", "title", "album", "year", "genre"].map { ($0, candidate[$0] as? String ?? "") })
+            accept(values, data, mime, warning)
         }
     }
 
@@ -1375,7 +1327,7 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         guard !libraryRows.isEmpty else { setStatus("Сначала выберите папку и нажмите «Сканировать»."); return }
         let alert = NSAlert()
         alert.messageText = "Обработать папку?"
-        alert.informativeText = "Будут заполнены только пустые поля у уверенных совпадений. Перед изменением сохранится копия файла."
+        alert.informativeText = "Для каждого файла будет выполнен поиск только через Shazam. Запишутся только полные совпадения с уверенностью от 92%; заполненные теги сохранятся. Перед изменением создастся копия файла."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Обработать")
         alert.addButton(withTitle: "Отмена")
@@ -1383,21 +1335,97 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         setBusy(true)
         progressIndicator.doubleValue = 0
         progressLabel.stringValue = "Подготовка…"
-        setStatus("Автообработка началась…", color: .controlAccentColor)
-        requestBackend("auto", payload: ["folder": folderField.stringValue, "api_key": acoustidKey]) { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .success(let response):
-                self.saveLibraryCache { cacheError in
-                    self.setBusy(false)
-                    self.progressIndicator.doubleValue = 100
-                    self.progressLabel.stringValue = "Готово"
-                    let summary = "Готово. Записано: \(response["updated"] as? Int ?? 0), пропущено: \(response["skipped"] as? Int ?? 0), ошибок: \(response["errors"] as? Int ?? 0)."
-                    self.setStatus(summary + (cacheError.map { " Кэш не сохранён: \($0.message)" } ?? ""), color: cacheError == nil ? .systemGreen : .systemOrange)
-                }
-            case .failure(let error):
+        setStatus("Автообработка Shazam началась…", color: .controlAccentColor)
+        runShazamAutoProcess(tracks: libraryRows, index: 0, updated: 0, skipped: 0, errors: 0)
+    }
+
+    private func runShazamAutoProcess(tracks: [LibraryTrack], index: Int, updated: Int, skipped: Int, errors: Int) {
+        guard index < tracks.count else {
+            saveLibraryCache { [weak self] cacheError in
+                guard let self else { return }
                 self.setBusy(false)
-                self.setStatus("Автообработка остановлена: \(error.message)", color: .systemRed)
+                self.progressIndicator.doubleValue = 100
+                self.progressLabel.stringValue = "Готово"
+                let summary = "Shazam завершил поиск. Записано: \(updated), пропущено: \(skipped), ошибок: \(errors)."
+                self.setStatus(summary + (cacheError.map { " Кэш не сохранён: \($0.message)" } ?? ""), color: cacheError == nil ? .systemGreen : .systemOrange)
+            }
+            return
+        }
+
+        let track = tracks[index]
+        let number = index + 1
+        progressIndicator.doubleValue = Double(index) / Double(max(tracks.count, 1)) * 100
+        progressLabel.stringValue = "\(number) / \(tracks.count)"
+
+        let existing = [
+            "artist": track.artist,
+            "title": track.title,
+            "album": track.album,
+            "year": track.year,
+            "genre": track.genre
+        ]
+        if existing.values.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            updateTrack(path: track.path, status: "Теги уже заполнены", values: nil, newPath: nil)
+            runShazamAutoProcess(tracks: tracks, index: number, updated: updated, skipped: skipped + 1, errors: errors)
+            return
+        }
+
+        setStatus("Ищу в Shazam: \(track.file) (\(number) из \(tracks.count))…", color: .controlAccentColor)
+        searchWithShazam(path: track.path) { [weak self] result in
+            guard let self else { return }
+            guard case .success(let candidates) = result else {
+                if case .failure(let error) = result {
+                    self.updateTrack(path: track.path, status: "Ошибка Shazam: \(error.localizedDescription)", values: nil, newPath: nil)
+                }
+                self.runShazamAutoProcess(tracks: tracks, index: number, updated: updated, skipped: skipped, errors: errors + 1)
+                return
+            }
+            guard let candidate = candidates.first(where: {
+                ($0["source"] as? String) == "Shazam" && self.candidateConfidencePercent($0) >= 92
+            }) else {
+                self.updateTrack(path: track.path, status: "Пропущено: Shazam не подтвердил совпадение от 92%", values: nil, newPath: nil)
+                self.runShazamAutoProcess(tracks: tracks, index: number, updated: updated, skipped: skipped + 1, errors: errors)
+                return
+            }
+
+            let finalValues: [String: String] = Dictionary(uniqueKeysWithValues: ["artist", "title", "album", "year", "genre"].map { key in
+                let current = existing[key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let matched = (candidate[key] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                return (key, current.isEmpty ? matched : current)
+            })
+            let missing = self.missingMetadataFields(finalValues)
+            guard missing.isEmpty else {
+                self.updateTrack(path: track.path, status: "Пропущено: не хватает \(missing.joined(separator: ", "))", values: nil, newPath: nil)
+                self.runShazamAutoProcess(tracks: tracks, index: number, updated: updated, skipped: skipped + 1, errors: errors)
+                return
+            }
+
+            let artworkURLs = [candidate["artwork_url"] as? String ?? "", candidate["apple_artwork_url"] as? String ?? ""].filter { !$0.isEmpty }
+            self.downloadArtwork(from: artworkURLs, index: 0) { cover, mime, _ in
+                self.requestBackend("write", payload: [
+                    "path": track.path,
+                    "folder": self.folderField.stringValue,
+                    "values": finalValues,
+                    "cover": cover?.base64EncodedString() ?? "",
+                    "cover_mime": mime
+                ]) { result in
+                    switch result {
+                    case .success(let response):
+                        let savedValues = response["values"] as? [String: Any] ?? finalValues
+                        let writeStatus = response["status"] as? String ?? "Записано"
+                        self.updateTrack(path: track.path, status: writeStatus, values: savedValues, newPath: response["path"] as? String)
+                        let wrote = writeStatus.hasPrefix("Записано")
+                        self.runShazamAutoProcess(
+                            tracks: tracks, index: number,
+                            updated: updated + (wrote ? 1 : 0),
+                            skipped: skipped + (wrote ? 0 : 1),
+                            errors: errors
+                        )
+                    case .failure(let error):
+                        self.updateTrack(path: track.path, status: "Ошибка: \(error.message)", values: nil, newPath: nil)
+                        self.runShazamAutoProcess(tracks: tracks, index: number, updated: updated, skipped: skipped, errors: errors + 1)
+                    }
+                }
             }
         }
     }
@@ -1465,16 +1493,11 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
                         confidence = max(0.82, 0.97 - Double(index) * 0.04)
                     }
                     return [
-                        "mbid": "",
                         "title": title,
                         "artist": artist,
                         "album": album,
                         "year": year,
                         "genre": genre,
-                        "release_id": "",
-                        "release_group_id": "",
-                        "mb_score": 0.0,
-                        "acoustid_score": 0.0,
                         "confidence": confidence,
                         "source": "Shazam",
                         "artwork_url": artworkURL,
@@ -1818,27 +1841,6 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         }
         currentCoverData = nil
         coverView.image = NSImage(systemSymbolName: "music.note", accessibilityDescription: "Обложка альбома")
-        lookupCover(path: path, generation: generation)
-    }
-
-    private func lookupCover(path: String, generation: Int) {
-        requestBackend("search", payload: ["path": path, "api_key": acoustidKey]) { [weak self] result in
-            guard let self, self.coverGeneration == generation, self.selectedPath == path,
-                  case .success(let response) = result else { return }
-            let candidates = response["candidates"] as? [[String: Any]] ?? []
-            guard let candidate = candidates.first(where: {
-                (($0["acoustid_score"] as? Double) ?? 0) >= 0.78 || (($0["confidence"] as? Double) ?? 0) >= 0.90
-            }) else { return }
-            self.requestBackend("select_candidate", payload: ["candidate": candidate]) { [weak self] coverResult in
-                guard let self, self.coverGeneration == generation, self.selectedPath == path,
-                      case .success(let value) = coverResult,
-                      let encoded = value["cover"] as? String, let data = Data(base64Encoded: encoded),
-                      let image = NSImage(data: data) else { return }
-                self.currentCoverData = data
-                self.currentCoverMime = value["cover_mime"] as? String ?? Self.imageMimeType(data)
-                self.coverView.image = image
-            }
-        }
     }
 
     private func loadPlayerCover(path: String) {
@@ -1922,7 +1924,7 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
             guard response == .OK, let path = panel.url?.path else { return }
             guard let self else { return }
             self.folderField.stringValue = path
-            self.requestBackend("save_settings", payload: ["folder": path, "api_key": self.acoustidKey]) { [weak self] _ in
+            self.requestBackend("save_settings", payload: ["folder": path]) { [weak self] _ in
                 self?.libraryRows = []
                 self?.selectedPath = nil
                 self?.tableView.deselectAll(nil)
@@ -1935,9 +1937,10 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
     @objc private func openSyncWindow() {
         if let syncWindow {
             syncWindow.makeKeyAndOrderFront(nil)
+            retryTailscaleSetupIfNeeded()
             return
         }
-        let dialog = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 430), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let dialog = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 620), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         dialog.title = "Синхронизация с iPod"
         dialog.center()
         let content = NSView()
@@ -1951,28 +1954,69 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor), stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             stack.topAnchor.constraint(equalTo: content.topAnchor), stack.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
-        stack.addArrangedSubview(makeLabel("Один сервер запускается вместе с iPod. Настройте iPhone один раз через AirDrop — дальше ссылка сохранится.", size: 12, weight: .regular, color: .secondaryLabelColor))
+        let introduction = makeLabel("Для простой синхронизации один раз войдите в Tailscale на Mac и iPhone в один tailnet и включите VPN на iPhone. iPod подготовит закрытую ссылку с ключом доступа; сертификатный профиль не нужен. Если Tailscale попросит настройку tailnet, включите MagicDNS и HTTPS-сертификаты.", size: 12, weight: .regular, color: .secondaryLabelColor)
+        introduction.maximumNumberOfLines = 0
+        introduction.lineBreakMode = .byWordWrapping
+        introduction.cell?.wraps = true
+        introduction.cell?.isScrollable = false
+        introduction.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        introduction.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
+        syncIntroductionLabel = introduction
+        stack.addArrangedSubview(introduction)
+        let setupMessage = makeLabel("", size: 11, weight: .medium, color: .systemOrange)
+        setupMessage.maximumNumberOfLines = 0
+        setupMessage.lineBreakMode = .byWordWrapping
+        setupMessage.cell?.wraps = true
+        setupMessage.cell?.isScrollable = false
+        setupMessage.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        setupMessage.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
+        setupMessage.isHidden = true
+        syncSetupMessageLabel = setupMessage
+        stack.addArrangedSubview(setupMessage)
+        let airDropAlternative = makeLabel("Резервный вариант без Tailscale: локальное подключение по Wi‑Fi с профилем ниже или ручная передача песен через AirDrop.", size: 11, weight: .regular, color: .secondaryLabelColor)
+        airDropAlternative.maximumNumberOfLines = 0
+        airDropAlternative.lineBreakMode = .byWordWrapping
+        airDropAlternative.cell?.wraps = true
+        airDropAlternative.cell?.isScrollable = false
+        airDropAlternative.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        airDropAlternative.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
+        stack.addArrangedSubview(airDropAlternative)
         syncStatusLabel = makeLabel("Запускаю сервер…", size: 12, weight: .medium, color: .secondaryLabelColor)
+        syncStatusLabel?.maximumNumberOfLines = 0
+        syncStatusLabel?.lineBreakMode = .byWordWrapping
+        syncStatusLabel?.cell?.wraps = true
+        syncStatusLabel?.cell?.isScrollable = false
+        syncStatusLabel?.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        syncStatusLabel?.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
         stack.addArrangedSubview(syncStatusLabel!)
         syncConnectionField = NSTextField(string: "")
         syncConnectionField?.isEditable = false
         syncConnectionField?.isSelectable = true
+        syncConnectionField?.lineBreakMode = .byTruncatingMiddle
+        syncConnectionField?.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         syncConnectionField?.placeholderString = "Ссылка для приложения iPod на iPhone"
         let connectionRow = horizontalStack(spacing: 8)
         connectionRow.addArrangedSubview(syncConnectionField!)
-        let copyButton = NSButton(title: "Копировать", target: self, action: #selector(copySyncConnection))
+        let copyButton = NSButton(title: "Копировать ссылку", target: self, action: #selector(copySyncConnection))
+        copyButton.setContentHuggingPriority(.required, for: .horizontal)
         connectionRow.addArrangedSubview(copyButton)
+        connectionRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
         let connectionSection = verticalStack(spacing: 4)
         connectionSection.addArrangedSubview(makeLabel("ССЫЛКА ДЛЯ ПОДКЛЮЧЕНИЯ", size: 10, weight: .semibold, color: .secondaryLabelColor))
         connectionSection.addArrangedSubview(connectionRow)
+        connectionSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
         stack.addArrangedSubview(connectionSection)
-        let actions = horizontalStack(spacing: 8)
+        let actions = verticalStack(spacing: 8)
+        actions.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
         syncProfileButton = NSButton(title: "Настроить iPhone через AirDrop", target: self, action: #selector(shareSyncSetupViaAirDrop))
         syncProfileButton?.isEnabled = false
+        syncProfileButton?.widthAnchor.constraint(equalTo: actions.widthAnchor).isActive = true
         actions.addArrangedSubview(syncProfileButton!)
         syncStartButton = NSButton(title: "Запустить сервер", target: self, action: #selector(startSyncFromWindow))
         syncStopButton = NSButton(title: "Остановить сервер", target: self, action: #selector(stopSyncFromWindow))
         syncStopButton?.isEnabled = false
+        syncStartButton?.widthAnchor.constraint(equalTo: actions.widthAnchor).isActive = true
+        syncStopButton?.widthAnchor.constraint(equalTo: actions.widthAnchor).isActive = true
         actions.addArrangedSubview(syncStartButton!)
         actions.addArrangedSubview(syncStopButton!)
         stack.addArrangedSubview(actions)
@@ -1986,15 +2030,17 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         logScroll.hasVerticalScroller = true
         logScroll.borderType = .bezelBorder
         logScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
+        logScroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
         stack.addArrangedSubview(logScroll)
         syncWindow = dialog
         updateSyncEndpointFields()
         dialog.makeKeyAndOrderFront(nil)
         if syncServerProcess?.isRunning != true { startSyncServer() }
         if syncServerProcess?.isRunning == true {
-            syncStatusLabel?.stringValue = "Сервер работает. Для первого подключения отправьте профиль через AirDrop."
+            updateSyncEndpointStatus()
             syncStartButton?.isEnabled = false
             syncStopButton?.isEnabled = true
+            retryTailscaleSetupIfNeeded()
         }
     }
 
@@ -2005,21 +2051,315 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
         guard let value = syncConnectionField?.stringValue, !value.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
-        syncStatusLabel?.stringValue = "Ссылка скопирована. Откройте её на iPhone, если AirDrop недоступен."
+        if syncEndpoints.first?["mode"] as? String == "tailscale" {
+            syncStatusLabel?.stringValue = "Ссылка скопирована. На iPhone откройте iPod → «Подключить с буфера обмена» и подтвердите системное «Вставить»."
+        } else {
+            syncStatusLabel?.stringValue = "Ссылка скопирована. Откройте её на iPhone, если AirDrop недоступен."
+        }
     }
 
     private func updateSyncEndpointFields() {
         guard let endpoint = syncEndpoints.first else { return }
         syncConnectionField?.stringValue = endpoint["connection"] as? String ?? ""
-        syncProfileButton?.isEnabled = syncServerProcess?.isRunning == true
+        let mode = endpoint["mode"] as? String == "tailscale" ? "tailscale" : "local"
+        let reportedSetupMessage = (endpoint["setupMessage"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let setupMessage = mode == "local" && reportedSetupMessage.isEmpty
+            ? "Для бесплатного закрытого подключения установите Tailscale на Mac и iPhone, войдите в один tailnet и включите MagicDNS и HTTPS-сертификаты в разделе DNS админки Tailscale."
+            : reportedSetupMessage
+        if mode == "tailscale" {
+            syncIntroductionLabel?.stringValue = "Закрытое подключение Tailscale Serve. Для первого подключения нажмите «Копировать ссылку» на Mac, затем в iPod на iPhone нажмите «Подключить с буфера обмена» и подтвердите системное «Вставить». На iPhone должен быть включён Tailscale в том же tailnet. Сертификат устанавливать не нужно."
+        } else {
+            syncIntroductionLabel?.stringValue = "Работает локальное HTTPS-подключение. После получения профиля на iPhone вручную включите полное доверие к iPod Local Audio CA: Настройки → Основные → Об этом устройстве → Настройки доверия сертификатам."
+        }
+        syncSetupMessageLabel?.stringValue = setupMessage
+        syncSetupMessageLabel?.isHidden = setupMessage.isEmpty
+        syncProfileButton?.isHidden = mode == "tailscale"
+        syncProfileButton?.title = "Настроить iPhone через AirDrop"
+        syncProfileButton?.isEnabled = mode == "local" && syncServerProcess?.isRunning == true
+    }
+
+    private func updateSyncEndpointStatus() {
+        guard let endpoint = syncEndpoints.first else {
+            syncStatusLabel?.stringValue = "Сервер работает. Подготавливаю подключение…"
+            return
+        }
+        if endpoint["mode"] as? String == "tailscale" {
+            syncStatusLabel?.stringValue = "Скопируйте ссылку. На iPhone откройте iPod → «Подключить с буфера обмена» и подтвердите системное «Вставить»."
+        } else {
+            syncStatusLabel?.stringValue = "Локальный сервер работает. Передайте профиль через AirDrop и включите полное доверие к его сертификату на iPhone."
+        }
+    }
+
+    private func retryTailscaleSetupIfNeeded() {
+        guard syncServerProcess?.isRunning == true,
+              !tailscaleSyncInProgress,
+              !syncEndpoints.contains(where: { $0["mode"] as? String == "tailscale" }),
+              let localEndpoint = syncEndpoints.first(where: { $0["mode"] as? String != "tailscale" }) else { return }
+        configureTailscaleServe(for: localEndpoint)
+    }
+
+    private func configureTailscaleServe(for localEndpoint: [String: Any]) {
+        tailscaleSyncGeneration += 1
+        let generation = tailscaleSyncGeneration
+        tailscaleSyncInProgress = true
+        tailscaleSyncMessage = "Локальный сервер запущен. Проверяю Tailscale и свободный адрес Serve…"
+        syncStatusLabel?.stringValue = tailscaleSyncMessage ?? "Проверяю Tailscale…"
+
+        tailscaleSyncQueue.async { [weak self] in
+            guard let self else { return }
+            let result = self.prepareTailscaleEndpoint(from: localEndpoint)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.tailscaleSyncGeneration == generation else { return }
+                self.tailscaleSyncInProgress = false
+                self.tailscaleSyncMessage = result.message
+
+                let localEndpoints = self.syncEndpoints.filter { $0["mode"] as? String != "tailscale" }
+                if let tailscaleEndpoint = result.endpoint {
+                    self.syncEndpoints = [tailscaleEndpoint] + localEndpoints
+                } else {
+                    var localFallback = localEndpoints.first ?? localEndpoint
+                    localFallback["mode"] = "local"
+                    localFallback["setupMessage"] = result.message
+                    self.syncEndpoints = [localFallback] + Array(localEndpoints.dropFirst())
+                }
+                self.updateSyncEndpointFields()
+                self.syncStatusLabel?.stringValue = result.message
+            }
+        }
+    }
+
+    private func prepareTailscaleEndpoint(from localEndpoint: [String: Any]) -> TailscaleSyncResult {
+        guard let localConnection = localEndpoint["connection"] as? String,
+              let certificateURL = localEndpoint["certificate"] as? String,
+              let backendPort = URLComponents(string: certificateURL)?.port,
+              backendPort > 0 else {
+            return localTailscaleFallback("не удалось определить локальный HTTPS-порт iPod")
+        }
+        guard let tailscaleCLI = findTailscaleCLI() else {
+            return localTailscaleFallback("на Mac не найден Tailscale CLI. Установите Tailscale и войдите на Mac и iPhone в один tailnet; на iPhone включите VPN")
+        }
+
+        let statusResult = runTailscaleCommand(tailscaleCLI, arguments: ["status", "--json"], timeout: 8)
+        guard statusResult.exitCode == 0,
+              let statusData = statusResult.output.data(using: .utf8),
+              let status = (try? JSONSerialization.jsonObject(with: statusData)) as? [String: Any] else {
+            return localTailscaleFallback(commandFailure("не удалось проверить вход в Tailscale на Mac", result: statusResult))
+        }
+        guard status["BackendState"] as? String == "Running" else {
+            return localTailscaleFallback("войдите в Tailscale на Mac и iPhone в один tailnet, затем включите VPN на iPhone")
+        }
+        guard let selfStatus = status["Self"] as? [String: Any],
+              let rawDNSName = selfStatus["DNSName"] as? String else {
+            return localTailscaleFallback("Tailscale не сообщил DNS-имя Mac. Проверьте подключение к tailnet и MagicDNS")
+        }
+        let dnsName = rawDNSName.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        let validTailscaleSuffix = dnsName.hasSuffix(".ts.net") || dnsName.hasSuffix(".beta.tailscale.net")
+        guard validTailscaleSuffix,
+              URLComponents(string: "https://\(dnsName)")?.host == dnsName else {
+            return localTailscaleFallback("Tailscale не выдал корректное MagicDNS-имя. Проверьте настройки DNS tailnet")
+        }
+
+        let configResult = runTailscaleCommand(tailscaleCLI, arguments: ["serve", "status", "--json"], timeout: 8)
+        guard configResult.exitCode == 0,
+              let configData = configResult.output.data(using: .utf8),
+              let config = (try? JSONSerialization.jsonObject(with: configData)) as? [String: Any] else {
+            return localTailscaleFallback(commandFailure("не удалось безопасно прочитать конфигурацию Serve; существующие маршруты не менял", result: configResult))
+        }
+
+        let backendTarget = "https+insecure://127.0.0.1:\(backendPort)"
+        var servePort = existingTailscaleServePort(config: config, dnsName: dnsName, backendTarget: backendTarget)
+        if servePort == nil {
+            guard let availablePort = unusedTailscaleServePort(in: config) else {
+                return localTailscaleFallback("не нашёл свободный HTTPS-порт Serve. Существующие Serve/Funnel-порты не менял")
+            }
+            let addResult = runTailscaleCommand(tailscaleCLI, arguments: [
+                "serve", "--bg", "--https=\(availablePort)", "--yes", backendTarget
+            ], timeout: 12)
+            let verifyResult = runTailscaleCommand(tailscaleCLI, arguments: ["serve", "status", "--json"], timeout: 8)
+            if verifyResult.exitCode == 0,
+               let verifyData = verifyResult.output.data(using: .utf8),
+               let verifiedConfig = (try? JSONSerialization.jsonObject(with: verifyData)) as? [String: Any],
+               let verifiedPort = existingTailscaleServePort(config: verifiedConfig, dnsName: dnsName, backendTarget: backendTarget) {
+                servePort = verifiedPort
+            } else {
+                return localTailscaleFallback(commandFailure("Tailscale Serve не подтвердил добавление маршрута; остальные маршруты не сбрасывал", result: addResult))
+            }
+        }
+        guard let servePort else {
+            return localTailscaleFallback("не удалось выбрать HTTPS-порт Tailscale Serve")
+        }
+
+        var serverOrigin = URLComponents()
+        serverOrigin.scheme = "https"
+        serverOrigin.host = dnsName
+        serverOrigin.port = servePort
+        guard let serverOriginURL = serverOrigin.url,
+              let connection = connectionLink(localConnection, serverOrigin: serverOriginURL.absoluteString) else {
+            return localTailscaleFallback("не удалось безопасно сформировать ссылку iPod с ключом доступа")
+        }
+
+        var endpoint = localEndpoint
+        endpoint["mode"] = "tailscale"
+        endpoint["setupMessage"] = ""
+        endpoint["address"] = dnsName
+        endpoint["interface"] = "tailscale"
+        endpoint["servePort"] = servePort
+        endpoint["connection"] = connection
+        return TailscaleSyncResult(
+            endpoint: endpoint,
+            message: "Tailscale Serve работает на \(dnsName):\(servePort). Ссылка ниже содержит ключ доступа. Один раз войдите в тот же tailnet на iPhone и включите VPN."
+        )
+    }
+
+    private func localTailscaleFallback(_ reason: String) -> TailscaleSyncResult {
+        TailscaleSyncResult(
+            endpoint: nil,
+            message: "Tailscale Serve не настроен: \(reason). Локальная ссылка сохранена ниже: нужен общий Wi‑Fi и доверие к профилю iPod; также можно использовать AirDrop."
+        )
+    }
+
+    private func findTailscaleCLI() -> URL? {
+        let pathCandidates = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map { String($0) + "/tailscale" }
+        let candidates = [
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+            "/usr/local/bin/tailscale",
+            "/opt/homebrew/bin/tailscale"
+        ] + pathCandidates
+        var seen = Set<String>()
+        return candidates.first { candidate in
+            seen.insert(candidate).inserted && FileManager.default.isExecutableFile(atPath: candidate)
+        }.map(URL.init(fileURLWithPath:))
+    }
+
+    private func runTailscaleCommand(_ executable: URL, arguments: [String], timeout: TimeInterval) -> (exitCode: Int32?, output: String, timedOut: Bool) {
+        let process = Process()
+        let outputPipe = Pipe()
+        let outputBuffer = CapturedProcessOutput()
+        let completion = DispatchSemaphore(value: 0)
+        let outputReadGroup = DispatchGroup()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+        process.terminationHandler = { _ in completion.signal() }
+
+        outputReadGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            outputBuffer.replace(with: outputPipe.fileHandleForReading.readDataToEndOfFile())
+            outputReadGroup.leave()
+        }
+        var environment = ProcessInfo.processInfo.environment
+        environment["TAILSCALE_BE_CLI"] = "1"
+        process.environment = environment
+        do {
+            try process.run()
+            outputPipe.fileHandleForWriting.closeFile()
+        } catch {
+            outputPipe.fileHandleForWriting.closeFile()
+            _ = outputReadGroup.wait(timeout: .now() + 1)
+            return (nil, error.localizedDescription, false)
+        }
+
+        var timedOut = completion.wait(timeout: .now() + timeout) == .timedOut
+        if timedOut && process.isRunning {
+            process.terminate()
+            _ = completion.wait(timeout: .now() + 1)
+        }
+        let finished = !process.isRunning
+        if finished { _ = outputReadGroup.wait(timeout: .now() + 1) }
+        return (finished ? process.terminationStatus : nil, outputBuffer.string(), timedOut)
+    }
+
+    private func commandFailure(_ reason: String, result: (exitCode: Int32?, output: String, timedOut: Bool)) -> String {
+        let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.timedOut { return "\(reason): команда Tailscale не ответила за отведённое время" }
+        if !detail.isEmpty {
+            let compactDetail = String(detail.prefix(240))
+            return "\(reason): \(compactDetail)"
+        }
+        if let exitCode = result.exitCode { return "\(reason) (код \(exitCode))" }
+        return reason
+    }
+
+    private func existingTailscaleServePort(config: [String: Any], dnsName: String, backendTarget: String) -> Int? {
+        guard let webServers = config["Web"] as? [String: Any] else { return nil }
+        for (hostAndPort, value) in webServers {
+            let parts = hostAndPort.split(separator: ":")
+            guard parts.count >= 2,
+                  parts.dropLast().joined(separator: ":").lowercased() == dnsName,
+                  let port = Int(parts.last ?? ""),
+                  let webServer = value as? [String: Any],
+                  let handlers = webServer["Handlers"] as? [String: Any],
+                  let rootHandler = handlers["/"] as? [String: Any],
+                  let proxy = rootHandler["Proxy"] as? String,
+                  proxy == backendTarget else { continue }
+            return port
+        }
+        return nil
+    }
+
+    private func unusedTailscaleServePort(in config: [String: Any]) -> Int? {
+        var occupiedPorts = Set<Int>()
+        func collectPorts(_ value: Any) {
+            guard let dictionary = value as? [String: Any] else { return }
+            if let tcp = dictionary["TCP"] as? [String: Any] {
+                occupiedPorts.formUnion(tcp.keys.compactMap(Int.init))
+            }
+            if let web = dictionary["Web"] as? [String: Any] {
+                for hostAndPort in web.keys {
+                    if let port = Int(hostAndPort.split(separator: ":").last ?? "") { occupiedPorts.insert(port) }
+                }
+            }
+            dictionary.values.forEach(collectPorts)
+        }
+        collectPorts(config)
+        let preferredPorts = [443, 8443, 10000, 9443, 10443, 11443]
+        return (preferredPorts + Array(20000...20100)).first { !occupiedPorts.contains($0) }
+    }
+
+    private func connectionLink(_ original: String, serverOrigin: String) -> String? {
+        guard var appURL = URLComponents(string: original),
+              let fragment = appURL.percentEncodedFragment else { return nil }
+        var fragmentComponents = URLComponents()
+        fragmentComponents.percentEncodedQuery = fragment
+        guard var items = fragmentComponents.queryItems,
+              items.contains(where: { $0.name == "muzika-download-token" && !($0.value ?? "").isEmpty }) else { return nil }
+        guard items.contains(where: { $0.name == "muzika-download-server" }) else { return nil }
+        items = items.map { item in
+            item.name == "muzika-download-server"
+                ? URLQueryItem(name: item.name, value: serverOrigin)
+                : item
+        }
+        fragmentComponents.queryItems = items
+        appURL.percentEncodedFragment = fragmentComponents.percentEncodedQuery
+        return appURL.url?.absoluteString
     }
 
     @objc private func shareSyncSetupViaAirDrop() {
+        guard let endpoint = syncEndpoints.first else {
+            syncStatusLabel?.stringValue = "Сервер ещё готовит профиль. Подождите и попробуйте снова."
+            return
+        }
+        guard endpoint["mode"] as? String != "tailscale" else {
+            syncStatusLabel?.stringValue = "Профиль не нужен: скопируйте ссылку на Mac, затем подключите её в iPod через буфер обмена."
+            return
+        }
         guard let supportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             syncStatusLabel?.stringValue = "Не удалось найти папку данных iPod."
             return
         }
-        let profileURL = supportURL.appendingPathComponent("iPod Sync/.local-certs/install-ca.mobileconfig")
+        let profileName = endpoint["profile"] as? String ?? "install-ca.mobileconfig"
+        guard profileName == "install-ca.mobileconfig" else {
+            syncStatusLabel?.stringValue = "Сервер передал неподдерживаемый профиль настройки."
+            return
+        }
+        let profileURL = supportURL
+            .appendingPathComponent("iPod Sync", isDirectory: true)
+            .appendingPathComponent(".local-certs", isDirectory: true)
+            .appendingPathComponent(profileName)
         guard FileManager.default.fileExists(atPath: profileURL.path) else {
             syncStatusLabel?.stringValue = "Профиль ещё готовится. Подождите пару секунд и попробуйте снова."
             return
@@ -2029,12 +2369,13 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
             return
         }
         sharingService.perform(withItems: [profileURL])
-        syncStatusLabel?.stringValue = "Выберите свой iPhone. После получения установите профиль iPod один раз."
+        syncStatusLabel?.stringValue = "Выберите iPhone и установите профиль. Затем включите полное доверие к iPod Local Audio CA в настройках iOS."
     }
 
     private func startSyncServer() {
         if syncServerProcess?.isRunning == true {
-            syncStatusLabel?.stringValue = "Сервер уже запущен."
+            updateSyncEndpointStatus()
+            retryTailscaleSetupIfNeeded()
             return
         }
         guard let resourceURL = Bundle.main.resourceURL else {
@@ -2069,6 +2410,11 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
             process.environment = environment
             process.standardOutput = pipe
             process.standardError = pipe
+            syncServerLastError = nil
+            syncServerStopRequested = false
+            tailscaleSyncMessage = nil
+            tailscaleSyncInProgress = false
+            tailscaleSyncGeneration += 1
             syncServerOutputBuffer.removeAll(keepingCapacity: true)
             syncServerProcess = process
             syncServerOutputPipe = pipe
@@ -2086,7 +2432,17 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
                     self.syncServerProcess = nil
                     self.syncServerOutputPipe?.fileHandleForReading.readabilityHandler = nil
                     self.syncServerOutputPipe = nil
-                    let message = endedProcess.terminationStatus == 0 ? "Сервер остановлен." : "Сервер завершился с ошибкой."
+                    self.tailscaleSyncGeneration += 1
+                    self.tailscaleSyncInProgress = false
+                    let message: String
+                    if self.syncServerStopRequested || endedProcess.terminationStatus == 0 {
+                        message = "Сервер остановлен."
+                    } else if let serverError = self.syncServerLastError, !serverError.isEmpty {
+                        message = "Ошибка сервера: \(serverError)"
+                    } else {
+                        message = "Сервер завершился с ошибкой (код \(endedProcess.terminationStatus)). Подробности — в журнале синхронизации."
+                    }
+                    self.syncServerStopRequested = false
                     self.syncStatusLabel?.stringValue = message
                     self.syncStartButton?.isEnabled = true
                     self.syncStopButton?.isEnabled = false
@@ -2112,12 +2468,16 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
     private func stopSyncServer() {
         guard let process = syncServerProcess, process.isRunning else {
             syncServerProcess = nil
+            syncServerStopRequested = false
             syncStatusLabel?.stringValue = "Сервер остановлен."
             syncStartButton?.isEnabled = true
             syncStopButton?.isEnabled = false
             syncProfileButton?.isEnabled = false
             return
         }
+        syncServerStopRequested = true
+        tailscaleSyncGeneration += 1
+        tailscaleSyncInProgress = false
         process.terminate()
         syncStatusLabel?.stringValue = "Останавливаю сервер…"
         syncStopButton?.isEnabled = false
@@ -2135,11 +2495,16 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
 
     private func processSyncServerLine(_ line: String) {
         if let storage = syncLogView?.textStorage {
-            storage.append(NSAttributedString(string: line + "\n"))
+            let displayLine = line.hasPrefix("IPOD_SYNC_READY:")
+                ? "IPOD_SYNC_READY: адрес и ключ подключения скрыты"
+                : line
+            storage.append(NSAttributedString(string: displayLine + "\n"))
             syncLogView?.scrollToEndOfDocument(nil)
         }
         if line.hasPrefix("IPOD_SYNC_ERROR:") {
-            syncStatusLabel?.stringValue = String(line.dropFirst("IPOD_SYNC_ERROR:".count))
+            let message = String(line.dropFirst("IPOD_SYNC_ERROR:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            syncServerLastError = message
+            syncStatusLabel?.stringValue = message
         }
         let prefix = "IPOD_SYNC_READY:"
         guard line.hasPrefix(prefix),
@@ -2148,7 +2513,8 @@ final class AudioLibraryTaggerDelegate: NSObject, NSApplicationDelegate, NSTable
               let endpoints = payload as? [[String: Any]] else { return }
         syncEndpoints = endpoints
         updateSyncEndpointFields()
-        syncStatusLabel?.stringValue = "Сервер работает. Первое подключение — профиль через AirDrop; дальше телефон запомнит сервер."
+        updateSyncEndpointStatus()
+        retryTailscaleSetupIfNeeded()
     }
 
     private func startBackend() {

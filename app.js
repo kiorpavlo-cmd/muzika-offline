@@ -146,6 +146,7 @@ function normalizeMacSyncServer(value) {
     const url = new URL(value);
     if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) return '';
     const host = url.hostname.toLowerCase();
+    const tailnetHost = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.ts\.net$/.test(host);
     const localName = host === 'localhost' || host.endsWith('.local');
     const octets = host.split('.').map((part) => /^\d+$/.test(part) ? Number(part) : -1);
     const privateIPv4 = octets.length === 4 && octets.every((part) => part >= 0 && part <= 255) && (
@@ -154,10 +155,34 @@ function normalizeMacSyncServer(value) {
       octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31 ||
       octets[0] === 169 && octets[1] === 254
     );
-    return localName || privateIPv4 ? url.origin : '';
+    return tailnetHost || localName || privateIPv4 ? url.origin : '';
   } catch {
     return '';
   }
+}
+
+function isTailscaleSyncServer(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname.toLowerCase().endsWith('.ts.net');
+  } catch {
+    return false;
+  }
+}
+
+function parseMacSyncConnectionLink(value) {
+  let parsed;
+  try {
+    parsed = new URL(String(value || '').trim());
+  } catch {
+    return null;
+  }
+  const params = new URLSearchParams(parsed.hash.replace(/^#/, ''));
+  const server = params.get('muzika-download-server') || '';
+  const token = (params.get('muzika-download-token') || '').toLowerCase();
+  const normalizedServer = normalizeMacSyncServer(server);
+  if (!normalizedServer || !/^[a-f0-9]{64}$/.test(token)) return null;
+  return { server: normalizedServer, token };
 }
 
 function downloadServerConfig() {
@@ -263,10 +288,13 @@ async function probeMacSyncServer(config, parentSignal) {
     return { connected: true, libraryReady: true, message: 'Mac и музыкальная папка доступны.' };
   } catch {
     if (parentSignal?.aborted) return { connected: false, libraryReady: false, message: 'Проверка отменена.' };
+    const recoveryHint = isTailscaleSyncServer(config.server)
+      ? 'Убедитесь, что Tailscale включён на iPhone и Mac, оба устройства вошли в одну tailnet, а сервер синхронизации запущен на Mac.'
+      : 'Проверьте Wi‑Fi, сервер и полное доверие к iPod Local Audio CA в Настройки → Основные → Об этом устройстве → Настройки доверия сертификатам.';
     return {
       connected: false,
       libraryReady: false,
-      message: 'Mac не отвечает. Подключите iPhone и Mac к одной сети Wi‑Fi. Адрес .local недоступен через 5G или мобильную сеть.'
+      message: 'Mac не отвечает. ' + recoveryHint + ' Если соединение всё ещё не работает, на Mac выберите песни и нажмите «AirDrop выбранных», затем на iPhone откройте iPod и нажмите «Импортировать музыку из AirDrop или Файлов» на домашней странице.'
     };
   } finally {
     clearTimeout(timeout);
@@ -317,6 +345,57 @@ async function refreshMacSyncSettingsStatus() {
   const result = await probeMacSyncServer(config);
   if (probeId !== macSyncSettingsProbeId || !$('#mac-sync-settings-status')?.isConnected) return;
   updateMacSyncSettingsStatus(result);
+}
+
+function openManualMacConnectionSettings(copiedLink = '') {
+  if (state.screen.type !== 'settings') pushScreen({ type: 'settings' });
+  const reconnect = $('.mac-sync-reconnect');
+  if (reconnect) reconnect.open = true;
+  const input = $('#download-server-input');
+  if (input && copiedLink) input.value = copiedLink;
+}
+
+async function connectMacFromClipboard() {
+  if (!navigator.clipboard?.readText) {
+    openManualMacConnectionSettings();
+    notify('Буфер обмена недоступен. Открыл настройки iPod — вставьте ссылку в поле вручную.');
+    return;
+  }
+
+  let copiedLink = '';
+  try {
+    copiedLink = await navigator.clipboard.readText();
+  } catch {
+    openManualMacConnectionSettings();
+    notify('Если iOS запросила разрешение на вставку, его можно подтвердить один раз. Открыл настройки iPod — вставьте ссылку вручную.');
+    return;
+  }
+
+  const candidate = parseMacSyncConnectionLink(copiedLink);
+  if (!candidate) {
+    openManualMacConnectionSettings(copiedLink);
+    notify('В буфере нет полной ссылки подключения Mac. Открыл настройки iPod; проверьте или вставьте ссылку вручную.');
+    return;
+  }
+
+  const connection = await probeMacSyncServer(candidate);
+  if (!connection.connected) {
+    openManualMacConnectionSettings(copiedLink);
+    notify(connection.message);
+    return;
+  }
+
+  localStorage.setItem('muzika-download-server', candidate.server);
+  localStorage.setItem('muzika-download-token', candidate.token);
+  closeSongMenu();
+  if (connection.libraryReady) {
+    render();
+    await openMacSync();
+  } else {
+    openManualMacConnectionSettings();
+    updateMacSyncSettingsStatus(connection);
+    notify(connection.message);
+  }
 }
 
 function stopMacSyncConnectionMonitor() {
@@ -861,7 +940,12 @@ function renderHome() {
   </div>` : '';
   const recentSection = recentlyPlayed.length ? `${sectionHeading('Недавно прослухані', 'Усі', 'recent')}<div class="song-list">${recentlyPlayed.slice(0, 5).map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : '';
   const librarySection = recentlyAdded.length ? `${sectionHeading('Недавно додані')}<div class="song-list">${recentlyAdded.map((track, i) => songRow(track, i, { showAlbum: true })).join('')}</div>` : `<div class="empty-state empty-state--home">${icon('music')}<strong>Ваша медіатека порожня</strong></div>`;
+  const quickSyncAction = downloadServerConfig()
+    ? '<button class="settings-action-card mac-sync-library-action" data-action="mac-sync">' + icon('download') + '<span><strong>Синхронизировать новые песни с Mac</strong><small>Новые и изменённые песни будут отмечены автоматически</small></span></button>'
+    : '<button class="settings-action-card mac-sync-library-action" data-action="connect-mac-clipboard">' + icon('download') + '<span><strong>Подключить Mac с буфера обмена</strong><small>Скопируйте ссылку синхронизации на Mac</small></span></button>';
+  const quickImportAction = '<button class="settings-action-card" data-action="import-audio">' + icon('plus') + '<span><strong>Импортировать музыку из AirDrop или Файлов</strong><small>Выберите полученные аудиофайлы — они сохранятся офлайн</small></span></button>';
   return `<header class="page-header page-header--home"><h1>Домівка</h1>${profileButtonMarkup()}</header>
+    <div class="library-import-card home-sync-actions">${quickSyncAction}${quickImportAction}</div>
     ${favoritesSection}${recentSection}${librarySection}`;
 }
 
@@ -880,7 +964,7 @@ function renderLibrary() {
   const added = [...allTracks()].reverse();
   const macSyncCard = downloadServerConfig()
     ? '<button class="settings-action-card mac-sync-library-action" data-action="mac-sync">' + icon('download') + '<span><strong>Синхронизировать новые песни с Mac</strong><small>Новые и изменённые песни будут отмечены автоматически</small></span></button>'
-    : '<button class="settings-action-card mac-sync-library-action" data-action="settings">' + icon('download') + '<span><strong>Подключить медиатеку Mac</strong><small>Одноразовая настройка через AirDrop</small></span></button>';
+    : '<button class="settings-action-card mac-sync-library-action" data-action="connect-mac-clipboard">' + icon('download') + '<span><strong>Подключить Mac с буфера обмена</strong><small>Скопируйте ссылку синхронизации на Mac</small></span></button>';
   return `<header class="page-header page-header--library"><h1>Медіатека</h1>${profileButtonMarkup()}</header>
     <div class="category-list">${categories}</div>
     <div class="library-import-card">${macSyncCard}<button class="settings-action-card" data-action="import-audio">${icon('plus')}<span><strong>Импортировать музыку из AirDrop или Файлов</strong><small>Выберите полученные аудиофайлы — они сохранятся офлайн</small></span></button></div>
@@ -1260,13 +1344,16 @@ function renderSettings() {
   const macServer = downloadServerConfig();
   const profileLabel = profile ? safeText(profile.name || profile.email) : 'Моя медіатека';
   const profileSub = profile ? safeText(profile.email) : 'Увійти через Google';
-  const setupFields = macServer ? '' :
-    '<label for="download-server-input">Если AirDrop недоступен, вставьте ссылку с Mac</label><textarea id="download-server-input" rows="3" placeholder="Ссылка подключения из iPod на Mac"></textarea>' +
-    '<button class="settings-action-card mac-sync-connect" data-action="save-download-server">' + icon('info') + '<span><strong>Подключить Mac</strong><small>Ссылка и ключ сохранятся на этом устройстве</small></span></button>';
+  const connectFields = '<button class="settings-action-card mac-sync-connect" data-action="connect-mac-clipboard">' + icon('info') + '<span><strong>Подключить с буфера обмена</strong><small>Сначала скопируйте ссылку подключения на Mac</small></span></button>' +
+    '<label for="download-server-input">Если вставка с буфера обмена не сработала, вставьте ссылку подключения с Mac вручную. Подойдут Tailscale HTTPS-ссылки *.ts.net и адрес локальной сети.</label><textarea id="download-server-input" rows="3" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://mac-name.tailnet.ts.net/#muzika-download-server=…&amp;muzika-download-token=…"></textarea>' +
+    '<button class="settings-action-card mac-sync-connect" data-action="save-download-server">' + icon('info') + '<span><strong>' + (macServer ? 'Проверить и обновить подключение' : 'Подключить Mac') + '</strong><small>' + (macServer ? 'Новый адрес будет проверен перед заменой сохранённого.' : 'Ссылка и ключ сохранятся на этом устройстве.') + '</small></span></button>';
+  const setupFields = macServer
+    ? '<details class="mac-sync-reconnect"><summary>Mac не отвечает или адрес изменился?</summary>' + connectFields + '</details>'
+    : connectFields;
   return '<header class="subpage-top"><button class="round-back" data-action="back">' + icon('back') + '</button><h2>Налаштування</h2><span></span></header>' +
     '<button class="settings-profile" data-action="google-account"><span class="profile-button profile-button--large">' + profileAvatarContents(profile) + '</span><span class="settings-profile-copy"><strong>' + profileLabel + '</strong><small>' + profileSub + '</small></span>' + icon('back', 'chevron') + '</button>' +
     '<a class="settings-action-card profile-download" href="./iPod.mobileconfig">' + icon('home') + '<span><strong>Додати iPod на iPhone або iPad</strong><small>Завантажити профіль із піктограмою iPod</small></span>' + icon('back', 'chevron') + '</a>' +
-    '<section class="mac-sync-settings"><h3>Синхронизация с Mac</h3><p>Один раз настройте iPhone через AirDrop. Для повторной передачи держите iPod открытым на Mac и нажмите синхронизацию в «Медиатеке».</p>' +
+    '<section class="mac-sync-settings"><h3>Синхронизация с Mac</h3><p>Основной маршрут: включите Tailscale на Mac и iPhone, запустите Tailscale Serve на Mac и войдите в одну tailnet. Вставьте ссылку Mac в поле ниже; локальные адреса Wi‑Fi остаются запасным вариантом и могут потребовать полного доверия к iPod Local Audio CA в настройках iPhone. Для повторной передачи держите сервер запущенным на Mac.</p><p>Если соединение не подходит, выделите песни на Mac и нажмите «AirDrop выбранных», затем на iPhone откройте iPod и импортируйте полученные файлы с домашней страницы.</p>' +
     setupFields +
     (macServer ? '<div class="mac-sync-settings-status"><strong id="mac-sync-settings-title">Проверяю подключение…</strong><small id="mac-sync-settings-status">Проверяю сервер и папку медиатеки</small></div>' : '') +
     '<button class="settings-action-card mac-sync-start" data-action="mac-sync" disabled>' + icon('download') + '<span><strong>Синхронизировать музыку</strong><small>Новые и изменённые песни отмечаются автоматически</small></span></button>' +
@@ -2185,6 +2272,7 @@ document.addEventListener('click', async (event) => {
     case 'settings': pushScreen({ type: 'settings' }); break;
     case 'youtube-download-placeholder': await downloadYouTubeAudio(id); break;
     case 'mac-sync': await openMacSync(); break;
+    case 'connect-mac-clipboard': await connectMacFromClipboard(); break;
     case 'mac-sync-download': await syncSelectedMacTracks(); break;
     case 'close-mac-sync': macSyncAbortController?.abort(); macSyncAbortController = null; stopMacSyncConnectionMonitor(); releaseMacSyncScreenWakeLock(); $('#modal-root').innerHTML = ''; break;
     case 'import-audio':
@@ -2193,31 +2281,12 @@ document.addEventListener('click', async (event) => {
     case 'save-download-server': {
       const input = $('#download-server-input');
       const raw = input?.value?.trim() || '';
-      let candidate = null;
-      if (raw) {
-        let parsed;
-        try {
-          parsed = new URL(raw.includes('#') ? raw : raw + '#');
-        } catch {
-          notify('Не удалось распознать ссылку.');
-          break;
-        }
-        const params = new URLSearchParams(parsed.hash.replace(/^#/, ''));
-        const server = params.get('muzika-download-server') || '';
-        const token = params.get('muzika-download-token') || '';
-        const normalizedServer = normalizeMacSyncServer(server);
-        const normalizedToken = token.toLowerCase();
-        if (!normalizedServer || !/^[a-f0-9]{64}$/.test(normalizedToken)) {
-          notify('Ссылка iPod с Mac некорректна. Скопируйте её полностью.');
-          break;
-        }
-        candidate = { server: normalizedServer, token: normalizedToken };
-      } else {
-        candidate = downloadServerConfig();
-        if (!candidate) {
-          notify('Вставьте ссылку подключения со страницы iPod на Mac.');
-          break;
-        }
+      const candidate = raw ? parseMacSyncConnectionLink(raw) : downloadServerConfig();
+      if (!candidate) {
+        notify(raw
+          ? 'Нужна полная HTTPS-ссылка Mac с адресом *.ts.net или локальным адресом. Скопируйте её целиком.'
+          : 'Вставьте ссылку подключения со страницы iPod на Mac.');
+        break;
       }
       updateMacSyncSettingsStatus(null, true);
       const connection = await probeMacSyncServer(candidate);
@@ -2229,8 +2298,13 @@ document.addEventListener('click', async (event) => {
       localStorage.setItem('muzika-download-server', candidate.server);
       localStorage.setItem('muzika-download-token', candidate.token);
       closeSongMenu();
-      render();
-      notify(connection.libraryReady ? 'Mac подключён, музыкальная папка доступна.' : connection.message);
+      if (connection.libraryReady) {
+        notify('Mac подключён, открываю список музыки.');
+        await openMacSync();
+      } else {
+        render();
+        notify(connection.message);
+      }
       break;
     }
     case 'clear-download-server':

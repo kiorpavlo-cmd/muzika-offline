@@ -24,8 +24,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+except ImportError:  # The native app backend does not need a Tk installation.
+    tk = None
+    filedialog = messagebox = ttk = None
 
 from mutagen import File as MutagenFile
 from mutagen.flac import FLAC, Picture
@@ -46,6 +50,37 @@ AUDIO_EXTENSIONS = {
     ".wav", ".aiff", ".aif", ".wma", ".ape", ".wv", ".mpc", ".tta",
 }
 COVER_SIZE = 632
+
+_GENRE_TRANSLATIONS = {
+    "поп": "Pop", "поп-музыка": "Pop", "поп-музика": "Pop",
+    "рок": "Rock", "рок-музыка": "Rock", "рок-музика": "Rock",
+    "электроника": "Electronic", "електроніка": "Electronic",
+    "электронная музыка": "Electronic", "електронна музика": "Electronic",
+    "рэп": "Hip-Hop/Rap", "реп": "Hip-Hop/Rap", "хип-хоп": "Hip-Hop/Rap", "хіп-хоп": "Hip-Hop/Rap",
+    "рнб": "R&B", "ритм-н-блюз": "R&B", "ритм-енд-блюз": "R&B",
+    "джаз": "Jazz", "блюз": "Blues", "классика": "Classical", "классическая": "Classical",
+    "класика": "Classical", "класична": "Classical", "народная": "Folk", "народна": "Folk",
+    "танцевальная": "Dance", "танцювальна": "Dance", "диско": "Disco", "регги": "Reggae",
+    "металл": "Metal", "метал": "Metal", "панк": "Punk", "соул": "Soul", "фанк": "Funk",
+    "инди": "Indie", "інді": "Indie", "эмбиент": "Ambient", "техно": "Techno",
+    "хаус": "House", "транс": "Trance", "шансон": "Chanson", "саундтрек": "Soundtrack",
+    "музыка из фильмов": "Soundtrack", "музика з фільмів": "Soundtrack",
+    "госпел": "Gospel", "инструментальная": "Instrumental", "інструментальна": "Instrumental",
+    "world": "World", "мировая музыка": "World", "світова музика": "World",
+}
+
+
+def normalize_genre(value: Any) -> str:
+    """Keep written genres in English; use None when translation is unknown."""
+    genre = clean_text(value)
+    if not genre:
+        return "None"
+    if genre.casefold() == "none":
+        return "None"
+    translated = _GENRE_TRANSLATIONS.get(genre.casefold())
+    if translated:
+        return translated
+    return genre if genre.isascii() else "None"
 
 _mb_lock = threading.Lock()
 _mb_last_request = 0.0
@@ -102,7 +137,7 @@ class Candidate:
             "title": self.title,
             "album": self.album,
             "year": self.year,
-            "genre": self.genre,
+            "genre": normalize_genre(self.genre),
         }
 
 
@@ -819,6 +854,7 @@ def embed_cover(path: Path, data: bytes, mime: str) -> str:
 
 def write_metadata(path: Path, values: dict[str, str], cover: bytes | None, cover_mime: str,
                    root: Path, overwrite: bool, create_backup: bool = True) -> tuple[str, Path | None]:
+    values["genre"] = normalize_genre(values.get("genre", ""))
     if cover:
         cover = normalize_cover(cover)
         cover_mime = "image/webp"
@@ -869,6 +905,8 @@ def save_settings(api_key: str, folder: str) -> None:
 
 class AudioTaggerApp:
     def __init__(self, root: tk.Tk):
+        if tk is None:
+            raise RuntimeError("Для запуска оконной версии требуется Tkinter.")
         self.root = root
         self.root.title("iPod")
         self.root.geometry("1180x760")
@@ -913,13 +951,13 @@ class AudioTaggerApp:
         body.add(list_frame, weight=4)
         body.add(detail_frame, weight=2)
 
-        columns = ("artist", "title", "album", "year", "genre", "status")
+        columns = ("artist", "title", "album", "year", "genre")
         self.table = ttk.Treeview(list_frame, columns=columns, show="tree headings", selectmode="browse")
         self.table.heading("#0", text="Файл")
         self.table.column("#0", width=205, minwidth=125)
         for key, title, width in (("artist", "Исполнитель", 140), ("title", "Название", 160),
                                   ("album", "Альбом", 150), ("year", "Год", 55),
-                                  ("genre", "Жанр", 105), ("status", "Статус", 115)):
+                                  ("genre", "Жанр", 105)):
             self.table.heading(key, text=title)
             self.table.column(key, width=width, minwidth=55)
         yscroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.table.yview)
@@ -994,7 +1032,7 @@ class AudioTaggerApp:
                 key = str(path)
                 self.tracks[key] = track
                 item = self.table.insert("", "end", text=path.name, values=(track.artist, track.title, track.album,
-                                                                             track.year, track.genre, track.status))
+                                                                             track.year, track.genre))
                 self.item_paths[item] = key
                 count += 1
         save_settings(self.key_var.get().strip(), str(folder))
@@ -1028,7 +1066,7 @@ class AudioTaggerApp:
                     setattr(track, key, values[key])
         item = next((iid for iid, item_path in self.item_paths.items() if item_path == path), None)
         if item:
-            self.table.item(item, values=(track.artist, track.title, track.album, track.year, track.genre, track.status))
+            self.table.item(item, values=(track.artist, track.title, track.album, track.year, track.genre))
 
     def search_selected(self) -> None:
         path = self.selected_path
@@ -1262,6 +1300,8 @@ class AudioTaggerApp:
 
 
 def main() -> None:
+    if tk is None:
+        raise RuntimeError("Для запуска оконной версии требуется Tkinter.")
     root = tk.Tk()
     try:
         ttk.Style().theme_use("aqua")
